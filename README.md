@@ -95,35 +95,13 @@ Copy `Settings.toml` to customize your configuration. The default `Settings.toml
 
 Sashiko supports multiple LLM providers (e.g. `gemini`). You must configure the provider and model in `Settings.toml`. There are no default values, so please set them explicitly.
 
-Example `Settings.toml` configuration for Gemini:
+For example configurations of each supported provider, see the `examples/` directory.
 
-```toml
-[ai]
-provider = "gemini"
-model = "gemini-3.1-pro-preview"
-# Optional settings
-# max_input_tokens = 950000
-# temperature = 1.0
-```
-
-#### Gemini CLI Skills
-
-For users of the [Gemini CLI](https://github.com/google/gemini-cli), we provide specialized skills to automate development workflows:
-
-- **`review-pr`**: Performs deep, scrutinizing code reviews against `GEMINI.md` and design documents. Detects relevant design files automatically and generates categorized findings with ready-to-paste diffs.
-- **`sashiko-feature`**: A meta-skill for implementing new features. It handles design document matching, codebase investigation, and ensures adherence to SOLID/DRY principles in Rust, while iteratively running `make` checks.
-
-##### Installing Skills
-
-To install these skills in your local workspace:
+You can copy the base Gemini configuration like so:
 
 ```bash
-gemini skills install ./skills/review-pr.skill --scope workspace
-gemini skills install ./skills/sashiko-feature.skill --scope workspace
-/skills reload
+cp examples/Settings.example.toml Settings.toml
 ```
-
-For users of other agent interfaces (e.g., OpenCode, Claude Code), we recommend following your interface's specific settings to symlink or copy the skill configurations (the `SKILL.md` and `references/` files) into your agent's custom instruction path.
 
 You can also configure settings via environment variables using the `SASHIKO` prefix and `__` (double underscore) as the separator between every segment (e.g., `SASHIKO__AI__PROVIDER=gemini`).
 
@@ -146,17 +124,7 @@ export LLM_API_KEY="sk-ant-..."
 ```
 
 **Update Settings.toml**:
-```toml
-[ai]
-provider = "claude"
-model = "claude-sonnet-4-6"
-max_input_tokens = 40000
-
-[ai.claude]
-prompt_caching = true
-# thinking = "enabled"    # Optional: enable extended thinking
-# effort = "high"         # Optional: thinking effort level
-```
+Copy `examples/Settings.claude.toml` to your `Settings.toml` and adjust as needed.
 
 **Features**:
 - Automatic prompt caching (5-minute TTL) reduces costs for repeated context
@@ -174,16 +142,7 @@ no per-token API charge and no API key to configure.
 **Prerequisites**: Install Claude Code and sign in. Verify with `claude --version`.
 
 **Update Settings.toml**:
-```toml
-[ai]
-provider = "claude-cli"
-model = "claude-opus-4-7"
-max_input_tokens = 950000
-max_interactions = 150
-
-# [ai.claude_cli]
-# effort = "high"   # Optional: "low", "medium", "high", "xhigh", "max"
-```
+Copy `examples/Settings.claude-cli.toml` to your `Settings.toml` and adjust as needed.
 
 `model` accepts any identifier the CLI accepts via `--model`: aliases like
 `opus` or `sonnet`, or full names like `claude-opus-4-7`, `claude-sonnet-4-6`.
@@ -223,13 +182,7 @@ subscription, so there is no per-token API charge and no API key to configure.
 - Authenticated session (run `copilot` once interactively to authenticate)
 
 **Update Settings.toml**:
-```toml
-[ai]
-provider = "copilot-cli"
-model = "claude-sonnet-4.5"
-max_input_tokens = 40000
-max_interactions = 150
-```
+Copy `examples/Settings.copilot-cli.toml` to your `Settings.toml` and adjust as needed.
 
 **Notes**:
 - `model` follows GitHub Copilot's catalog (e.g. `claude-sonnet-4.5`,
@@ -263,15 +216,7 @@ aws configure
 ```
 
 **Update Settings.toml**:
-```toml
-[ai]
-provider = "bedrock"
-model = "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
-max_input_tokens = 40000
-
-[ai.bedrock]
-region = "us-east-1"  # Optional, falls back to AWS SDK defaults
-```
+Copy `examples/Settings.claude-bedrock.toml` to your `Settings.toml` and adjust as needed.
 
 **Features**:
 - Uses the Converse API — works with any Bedrock-hosted model
@@ -297,17 +242,7 @@ export CLOUD_ML_REGION="us-east5"  # or "global" for global endpoints
 ```
 
 **Update Settings.toml**:
-```toml
-[ai]
-provider = "vertex"
-model = "claude-sonnet-4-6"
-max_input_tokens = 40000
-
-[ai.vertex]
-prompt_caching = true
-# project_id = "my-gcp-project"  # Falls back to ANTHROPIC_VERTEX_PROJECT_ID
-# region = "us-east5"            # Falls back to CLOUD_ML_REGION
-```
+Copy `examples/Settings.claude-vertex.toml` to your `Settings.toml` and adjust as needed.
 
 **Features**:
 - Model-agnostic routing layer — currently supports Claude, extensible to other model families
@@ -323,15 +258,7 @@ Sashiko supports using the local `kiro-cli` as a completion backend.
 **Prerequisites**: Install `kiro-cli` and authenticate with `KIRO_API_KEY` or a browser login.
 
 **Update Settings.toml**:
-```toml
-[ai]
-provider = "kiro-cli"
-model = "claude-opus-4.6"
-
-[ai.kiro_cli]
-binary = "kiro-cli"
-context_window_size = 200000
-```
+Copy `examples/Settings.kiro-cli.toml` to your `Settings.toml` and adjust as needed.
 
 **Features**:
 - Runs `kiro-cli acp` as a stateless completion backend
@@ -461,6 +388,25 @@ This project was built using Gemini CLI. If you're using other development agent
 Please, make sure your code is working before sending PR. Make sure it can be built without warnings, all tests pass, run cargo fmt and clippy.
 If you're changing AI-related parts, please, run at least several code reviews.
 Development got much faster these days, but testing is as important as ever.
+
+### Gemini CLI Skills
+
+For users of the [Gemini CLI](https://github.com/google/gemini-cli), we provide specialized skills to automate development workflows:
+
+- **`review-pr`**: Performs deep, scrutinizing code reviews against `GEMINI.md` and design documents. Detects relevant design files automatically and generates categorized findings with ready-to-paste diffs.
+- **`sashiko-feature`**: A meta-skill for implementing new features. It handles design document matching, codebase investigation, and ensures adherence to SOLID/DRY principles in Rust, while iteratively running `make` checks.
+
+#### Installing Skills
+
+To install these skills in your local workspace:
+
+```bash
+gemini skills install ./skills/review-pr.skill --scope workspace
+gemini skills install ./skills/sashiko-feature.skill --scope workspace
+/skills reload
+```
+
+For users of other agent interfaces (e.g., OpenCode, Claude Code), we recommend following your interface's specific settings to symlink or copy the skill configurations (the `SKILL.md` and `references/` files) into your agent's custom instruction path.
 
 ## License
 

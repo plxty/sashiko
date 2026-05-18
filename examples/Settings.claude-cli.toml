@@ -1,0 +1,8 @@
+[ai]
+provider = "claude-cli"
+model = "claude-opus-4-7"
+max_input_tokens = 950000
+max_interactions = 150
+
+[ai.claude_cli]
+# effort = "high"

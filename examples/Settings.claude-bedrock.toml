@@ -1,0 +1,11 @@
+[ai]
+provider = "bedrock"
+model = "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
+max_input_tokens = 40000
+
+[ai.bedrock]
+region = "us-east-1"
+prompt_caching = true
+max_tokens = 8192
+# thinking = "adaptive"
+# effort = "high"

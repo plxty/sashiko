@@ -1,0 +1,3 @@
+[ai]
+provider = "codex-cli"
+model = "gpt-4o"

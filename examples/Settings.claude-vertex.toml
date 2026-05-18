@@ -1,0 +1,12 @@
+[ai]
+provider = "vertex"
+model = "claude-sonnet-4-6"
+max_input_tokens = 40000
+
+[ai.vertex]
+prompt_caching = true
+max_tokens = 8192
+# project_id = "my-gcp-project" # Optional: Falls back to ANTHROPIC_VERTEX_PROJECT_ID
+# region = "us-east5"           # Optional: Falls back to CLOUD_ML_REGION
+# thinking = "enabled"
+# effort = "high"

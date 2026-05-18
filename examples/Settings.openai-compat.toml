@@ -1,0 +1,9 @@
+[ai]
+# Can be "openai" or "openai-compatible"
+provider = "openai-compatible"
+model = "gemma-xyz"
+
+[ai.openai_compat]
+base_url = "http://localhost:8080/v1"
+context_window_size = 8192
+max_tokens = 2048

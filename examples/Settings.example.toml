@@ -1,0 +1,8 @@
+[ai]
+provider = "gemini"
+model = "gemini-3.1-pro-preview"
+max_input_tokens = 950000
+temperature = 1.0
+
+[ai.gemini]
+explicit_prompt_caching = false
