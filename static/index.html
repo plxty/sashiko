@@ -2063,25 +2063,73 @@
 
                     // Findings
                     if (outputJson && outputJson.findings && Array.isArray(outputJson.findings)) {
-                        let counts = { low: 0, medium: 0, high: 0, critical: 0 };
-                        outputJson.findings.forEach(f => {
-                            const s = (f.severity || '').toLowerCase();
-                            if (s === 'critical') counts.critical++;
-                            else if (s === 'high') counts.high++;
-                            else if (s === 'medium') counts.medium++;
-                            else counts.low++;
-                        });
+                        const isPatchset = (r.patch_id === null || r.patch_id === undefined);
                         
-                        const total = counts.low + counts.medium + counts.high + counts.critical;
-                        if (total === 0) {
-                            displayResult = '<span style="color:#2e7d32;font-weight:bold;">No regressions</span>';
+                        if (isPatchset) {
+                            // For patchsets, only count and display newly introduced bugs.
+                            const newFindings = outputJson.findings.filter(f => !f.preexisting);
+                            let counts = { low: 0, medium: 0, high: 0, critical: 0 };
+                            newFindings.forEach(f => {
+                                const s = (f.severity || '').toLowerCase();
+                                if (s === 'critical') counts.critical++;
+                                else if (s === 'high') counts.high++;
+                                else if (s === 'medium') counts.medium++;
+                                else counts.low++;
+                            });
+                            
+                            const total = counts.low + counts.medium + counts.high + counts.critical;
+                            if (total === 0) {
+                                displayResult = '<span style="color:#2e7d32;font-weight:bold;">No regressions</span>';
+                            } else {
+                                const parts = [];
+                                parts.push(`Critical: <span style="${counts.critical > 0 ? 'color:#B71C1C;font-weight:bold' : 'color:var(--text-dim)'}">${counts.critical}</span>`);
+                                parts.push(`High: <span style="${counts.high > 0 ? 'color:#FF5722;font-weight:bold' : 'color:var(--text-dim)'}">${counts.high}</span>`);
+                                parts.push(`Medium: <span style="${counts.medium > 0 ? 'color:#FF9800;font-weight:bold' : 'color:var(--text-dim)'}">${counts.medium}</span>`);
+                                parts.push(`Low: <span style="${counts.low > 0 ? 'color:#FBC02D;font-weight:bold' : 'color:var(--text-dim)'}">${counts.low}</span>`);
+                                displayResult = parts.join(' · ');
+                            }
                         } else {
-                            const parts = [];
-                            parts.push(`Critical: <span style="${counts.critical > 0 ? 'color:#B71C1C;font-weight:bold' : 'color:var(--text-dim)'}">${counts.critical}</span>`);
-                            parts.push(`High: <span style="${counts.high > 0 ? 'color:#FF5722;font-weight:bold' : 'color:var(--text-dim)'}">${counts.high}</span>`);
-                            parts.push(`Medium: <span style="${counts.medium > 0 ? 'color:#FF9800;font-weight:bold' : 'color:var(--text-dim)'}">${counts.medium}</span>`);
-                            parts.push(`Low: <span style="${counts.low > 0 ? 'color:#FBC02D;font-weight:bold' : 'color:var(--text-dim)'}">${counts.low}</span>`);
-                            displayResult = parts.join(' · ');
+                            // For individual patches, count new and preexisting separately.
+                            let counts = {
+                                low: { new: 0, preexisting: 0 },
+                                medium: { new: 0, preexisting: 0 },
+                                high: { new: 0, preexisting: 0 },
+                                critical: { new: 0, preexisting: 0 }
+                            };
+                            outputJson.findings.forEach(f => {
+                                const s = (f.severity || '').toLowerCase();
+                                const preexisting = !!f.preexisting;
+                                const target = preexisting ? 'preexisting' : 'new';
+                                if (s === 'critical') counts.critical[target]++;
+                                else if (s === 'high') counts.high[target]++;
+                                else if (s === 'medium') counts.medium[target]++;
+                                else counts.low[target]++;
+                            });
+                            
+                            const totalNew = counts.low.new + counts.medium.new + counts.high.new + counts.critical.new;
+                            const totalPre = counts.low.preexisting + counts.medium.preexisting + counts.high.preexisting + counts.critical.preexisting;
+                            
+                            if (totalNew + totalPre === 0) {
+                                displayResult = '<span style="color:#2e7d32;font-weight:bold;">No regressions</span>';
+                            } else {
+                                const renderSeverity = (label, severityCounts, color) => {
+                                    const newCount = severityCounts.new;
+                                    const preCount = severityCounts.preexisting;
+                                    let newSpan = `<span style="${newCount > 0 ? 'color:' + color + ';font-weight:bold' : 'color:var(--text-dim)'}">${newCount}</span>`;
+                                    let preSpan = '';
+                                    if (preCount > 0) {
+                                        preSpan = ` <span style="color:var(--text-dim)">(<span style="color:${color}">${preCount}</span>)</span>`;
+                                    }
+                                    return `${label}: ${newSpan}${preSpan}`;
+                                };
+                                
+                                const parts = [];
+                                parts.push(renderSeverity('Critical', counts.critical, '#B71C1C'));
+                                parts.push(renderSeverity('High', counts.high, '#FF5722'));
+                                parts.push(renderSeverity('Medium', counts.medium, '#FF9800'));
+                                parts.push(renderSeverity('Low', counts.low, '#FBC02D'));
+                                displayResult = parts.join(' · ');
+                            }
                         }
                         parsedFindings = true;
                     }

@@ -596,6 +596,22 @@ fn review_has_issues(review: &Value) -> bool {
         .is_some_and(|inline| !inline.is_empty() && inline != "No issues found.")
 }
 
+fn review_has_new_issues(review: &Value) -> bool {
+    if let Some(output_str) = review.get("output").and_then(|o| o.as_str())
+        && let Ok(output_json) = serde_json::from_str::<Value>(output_str)
+        && let Some(findings) = output_json.get("findings").and_then(|f| f.as_array())
+    {
+        return findings.iter().any(|f| {
+            let preexisting = f
+                .get("preexisting")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            !preexisting
+        });
+    }
+    review_has_issues(review)
+}
+
 fn find_best_review_for_patch(patch_id: i64, reviews: &[Value]) -> Option<&Value> {
     let refs: Vec<&Value> = reviews.iter().collect();
     find_best_review_for_patch_refs(patch_id, &refs)
@@ -617,7 +633,7 @@ fn find_best_review_for_patch_refs<'a>(patch_id: i64, reviews: &[&'a Value]) -> 
 }
 
 fn review_result_label(review: &Value) -> &str {
-    if review_has_issues(review) {
+    if review_has_new_issues(review) {
         "Issues Found"
     } else {
         review.get("status").and_then(|s| s.as_str()).unwrap_or("")
@@ -655,7 +671,7 @@ fn print_patch_line(patch: &Value, review: Option<&Value>, show_inline: bool) {
     }
 
     if let Some(rev) = review {
-        let has_issues = review_has_issues(rev);
+        let has_issues = review_has_new_issues(rev);
         let rev_status = rev.get("status").and_then(|s| s.as_str()).unwrap_or("");
         print!(" [");
         let color = if has_issues {
@@ -881,6 +897,7 @@ async fn handle_show(
                                     &format!("Patch {}: {}", idx, subject),
                                     findings,
                                     inline,
+                                    SummaryMode::Patch,
                                 );
                             }
                         }
@@ -948,7 +965,7 @@ fn show_summary(
 
             match rev.get("status").and_then(|s| s.as_str()).unwrap_or("") {
                 "Reviewed" => {
-                    if review_has_issues(rev) {
+                    if review_has_new_issues(rev) {
                         reviewed_issues += 1;
                         let idx = patch["part_index"].as_i64().unwrap_or(0);
                         let subject = patch["subject"].as_str().unwrap_or("").to_string();
@@ -1013,7 +1030,7 @@ fn show_summary(
                 for patch in patches {
                     let p_id = patch["id"].as_i64().unwrap_or(0);
                     if let Some(rev) = find_best_review_for_patch_refs(p_id, &all_reviews)
-                        && review_has_issues(rev)
+                        && review_has_new_issues(rev)
                     {
                         print_patch_line(patch, Some(rev), opts.inline);
                     }
@@ -1078,7 +1095,12 @@ fn show_single_patch(
                 let idx = patch["part_index"].as_i64().unwrap_or(0);
                 let subject = patch["subject"].as_str().unwrap_or("");
                 let inline = rev.get("inline_review").and_then(|s| s.as_str());
-                print_findings_summary(&format!("Patch {}: {}", idx, subject), findings, inline);
+                print_findings_summary(
+                    &format!("Patch {}: {}", idx, subject),
+                    findings,
+                    inline,
+                    SummaryMode::Patch,
+                );
             }
         }
     }
@@ -1097,7 +1119,7 @@ fn show_issues(
     for patch in patches {
         let p_id = patch["id"].as_i64().unwrap_or(0);
         if let Some(rev) = find_best_review_for_patch_refs(p_id, &all_reviews)
-            && review_has_issues(rev)
+            && review_has_new_issues(rev)
         {
             issue_patches.push((patch, rev));
         }
@@ -1138,6 +1160,7 @@ fn show_issues(
                         &format!("Patch {}: {}", idx, subject),
                         findings,
                         inline,
+                        SummaryMode::Patch,
                     );
                 }
             }
@@ -1632,8 +1655,12 @@ async fn handle_local(
         if let Some(review) = result.get("review")
             && let Some(findings) = review.get("findings").and_then(|f| f.as_array())
         {
-            let (c, h, m, l) = count_severities(findings);
-            if c > 0 || h > 0 || m > 0 || l > 0 {
+            let counts = count_severities(findings);
+            if counts.critical.new > 0
+                || counts.high.new > 0
+                || counts.medium.new > 0
+                || counts.low.new > 0
+            {
                 has_issues = true;
             }
         }
@@ -1658,8 +1685,8 @@ async fn handle_local(
         if let Some(review) = result.get("review")
             && let Some(findings) = review.get("findings").and_then(|f| f.as_array())
         {
-            let (c, h, _, _) = count_severities(findings);
-            if c > 0 || h > 0 {
+            let counts = count_severities(findings);
+            if counts.critical.new > 0 || counts.high.new > 0 {
                 std::process::exit(1);
             }
         }
@@ -1753,7 +1780,17 @@ fn print_local_review_results(result: &Value, input: &str) {
     {
         let inline = result.get("inline_review").and_then(|s| s.as_str());
         println!();
-        if !print_findings_summary("Review Findings:", findings, inline) {
+        let num_patches = result
+            .get("patches")
+            .and_then(|p| p.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let mode = if num_patches > 1 {
+            SummaryMode::Patchset
+        } else {
+            SummaryMode::Patch
+        };
+        if !print_findings_summary("Review Findings:", findings, inline, mode) {
             print_colored(Color::Green, "\nNo issues found.\n");
         }
     }
@@ -1770,36 +1807,111 @@ fn print_local_review_results(result: &Value, input: &str) {
     }
 }
 
+#[derive(Default, Clone, Copy, Debug)]
+struct BugCounts {
+    new: usize,
+    preexisting: usize,
+}
+
+#[derive(Default, Debug)]
+struct SeverityCounts {
+    critical: BugCounts,
+    high: BugCounts,
+    medium: BugCounts,
+    low: BugCounts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SummaryMode {
+    Patch,
+    Patchset,
+}
+
 /// Count finding severities from a findings JSON array.
-fn count_severities(findings: &[Value]) -> (usize, usize, usize, usize) {
-    let mut counts = std::collections::HashMap::new();
+fn count_severities(findings: &[Value]) -> SeverityCounts {
+    let mut counts = SeverityCounts::default();
     for f in findings {
         if let Some(sev) = f.get("severity").and_then(|s| s.as_str()) {
-            *counts.entry(sev.to_lowercase()).or_insert(0) += 1;
+            let preexisting = f
+                .get("preexisting")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let entry = match sev.to_lowercase().as_str() {
+                "critical" => &mut counts.critical,
+                "high" => &mut counts.high,
+                "medium" => &mut counts.medium,
+                "low" => &mut counts.low,
+                _ => continue,
+            };
+            if preexisting {
+                entry.preexisting += 1;
+            } else {
+                entry.new += 1;
+            }
         }
     }
-    (
-        counts.get("critical").copied().unwrap_or(0),
-        counts.get("high").copied().unwrap_or(0),
-        counts.get("medium").copied().unwrap_or(0),
-        counts.get("low").copied().unwrap_or(0),
-    )
+    counts
 }
 
 /// Print a findings summary line with severity counts if any findings exist.
 /// Returns true if findings were printed.
-fn print_findings_summary(label: &str, findings: &[Value], inline_review: Option<&str>) -> bool {
-    let (c, h, m, l) = count_severities(findings);
-    if c == 0 && h == 0 && m == 0 && l == 0 {
+fn print_severity_count(label: &str, counts: BugCounts, color: Color, mode: SummaryMode) {
+    print!("{}: ", label);
+    print_colored(color, &counts.new.to_string());
+    if matches!(mode, SummaryMode::Patch) && counts.preexisting > 0 {
+        print!(" (");
+        print_colored(color, &counts.preexisting.to_string());
+        print!(")");
+    }
+}
+
+/// Print a findings summary line with severity counts if any findings exist.
+/// Returns true if findings were printed.
+fn print_findings_summary(
+    label: &str,
+    findings: &[Value],
+    inline_review: Option<&str>,
+    mode: SummaryMode,
+) -> bool {
+    let findings_to_process = if matches!(mode, SummaryMode::Patchset) {
+        findings
+            .iter()
+            .filter(|f| {
+                !f.get("preexisting")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<Value>>()
+    } else {
+        findings.to_vec()
+    };
+
+    let counts = count_severities(&findings_to_process);
+    let has_any_bugs = counts.critical.new > 0
+        || counts.critical.preexisting > 0
+        || counts.high.new > 0
+        || counts.high.preexisting > 0
+        || counts.medium.new > 0
+        || counts.medium.preexisting > 0
+        || counts.low.new > 0
+        || counts.low.preexisting > 0;
+
+    if !has_any_bugs {
         return false;
     }
-    println!("{}", label);
-    println!(
-        "Critical: {} · High: {} · Medium: {} · Low: {}\n",
-        c, h, m, l
-    );
 
-    for f in findings {
+    println!("{}", label);
+    print_severity_count("Critical", counts.critical, Color::Red, mode);
+    print!(" · ");
+    print_severity_count("High", counts.high, Color::Red, mode);
+    print!(" · ");
+    print_severity_count("Medium", counts.medium, Color::Yellow, mode);
+    print!(" · ");
+    print_severity_count("Low", counts.low, Color::Cyan, mode);
+    println!("\n");
+
+    for f in &findings_to_process {
         let sev = f
             .get("severity")
             .and_then(|s| s.as_str())
@@ -1864,5 +1976,81 @@ fn format_timestamp(ts: i64) -> String {
             local_dt.format("%Y-%m-%d %H:%M:%S").to_string()
         }
         _ => ts.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_count_severities_mixed() {
+        let findings = vec![
+            json!({ "severity": "Critical", "preexisting": false }),
+            json!({ "severity": "Critical", "preexisting": true }),
+            json!({ "severity": "High", "preexisting": false }),
+            json!({ "severity": "Medium", "preexisting": true }),
+            json!({ "severity": "Low", "preexisting": false }),
+            json!({ "severity": "Low", "preexisting": false }),
+            json!({ "severity": "Unknown", "preexisting": false }), // Should be ignored
+        ];
+
+        let counts = count_severities(&findings);
+
+        assert_eq!(counts.critical.new, 1);
+        assert_eq!(counts.critical.preexisting, 1);
+        assert_eq!(counts.high.new, 1);
+        assert_eq!(counts.high.preexisting, 0);
+        assert_eq!(counts.medium.new, 0);
+        assert_eq!(counts.medium.preexisting, 1);
+        assert_eq!(counts.low.new, 2);
+        assert_eq!(counts.low.preexisting, 0);
+    }
+
+    #[test]
+    fn test_count_severities_default_new() {
+        let findings = vec![
+            json!({ "severity": "High" }), // Missing preexisting should default to false (new)
+        ];
+        let counts = count_severities(&findings);
+        assert_eq!(counts.high.new, 1);
+        assert_eq!(counts.high.preexisting, 0);
+    }
+
+    #[test]
+    fn test_review_has_new_issues_scenarios() {
+        // 1. Empty review
+        let r_empty = json!({});
+        assert!(!review_has_new_issues(&r_empty));
+
+        // 2. No issues found inline
+        let r_clean_inline = json!({ "inline_review": "No issues found." });
+        assert!(!review_has_new_issues(&r_clean_inline));
+
+        // 3. Issues found inline, no output findings (fallback)
+        let r_issues_inline = json!({ "inline_review": "Some issues." });
+        assert!(review_has_new_issues(&r_issues_inline));
+
+        // 4. Only preexisting findings in output
+        let r_preexisting = json!({
+            "inline_review": "Some issues.",
+            "output": "{\"findings\": [{\"severity\": \"High\", \"preexisting\": true}]}"
+        });
+        assert!(!review_has_new_issues(&r_preexisting));
+
+        // 5. Only new findings in output
+        let r_new = json!({
+            "inline_review": "Some issues.",
+            "output": "{\"findings\": [{\"severity\": \"High\", \"preexisting\": false}]}"
+        });
+        assert!(review_has_new_issues(&r_new));
+
+        // 6. Mixed findings in output
+        let r_mixed = json!({
+            "inline_review": "Some issues.",
+            "output": "{\"findings\": [{\"severity\": \"High\", \"preexisting\": true}, {\"severity\": \"Low\", \"preexisting\": false}]}"
+        });
+        assert!(review_has_new_issues(&r_mixed));
     }
 }
