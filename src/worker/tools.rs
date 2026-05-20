@@ -25,6 +25,29 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+fn validate_git_args(
+    args: &[&str],
+    allowed_exact: &[&str],
+    allowed_prefixes: &[&str],
+) -> Result<()> {
+    for arg in args {
+        if *arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            let is_allowed = allowed_exact.contains(arg)
+                || allowed_prefixes.iter().any(|p| arg.starts_with(p))
+                || (arg.starts_with("-U") && arg[2..].chars().all(|c| c.is_ascii_digit()))
+                || (arg.starts_with("-n") && arg[2..].chars().all(|c| c.is_ascii_digit()));
+
+            if !is_allowed {
+                return Err(anyhow!("Forbidden git option: {}", arg));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct ToolBox {
     worktree_path: PathBuf,
     prompts_path: Option<PathBuf>,
@@ -401,6 +424,10 @@ impl ToolBox {
             .ok_or_else(|| anyhow!("Missing args"))?;
         let diff_args_str: Vec<&str> = diff_args.iter().filter_map(|v| v.as_str()).collect();
 
+        let allowed_exact = ["--stat", "--name-only", "--name-status", "-p", "-R", "--"];
+        let allowed_prefixes = ["--unified=", "--diff-algorithm="];
+        validate_git_args(&diff_args_str, &allowed_exact, &allowed_prefixes)?;
+
         let output = Command::new("git")
             .current_dir(&self.worktree_path)
             .arg("diff")
@@ -429,6 +456,40 @@ impl ToolBox {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
+
+        let allowed_exact = [
+            "--oneline",
+            "--graph",
+            "--decorate",
+            "--abbrev-commit",
+            "-p",
+            "--stat",
+            "--name-only",
+            "--name-status",
+            "--follow",
+            "--",
+            "--since",
+            "--until",
+            "--author",
+            "--grep",
+            "-S",
+            "-G",
+            "-n",
+            "--max-count",
+        ];
+        let allowed_prefixes = [
+            "--since=",
+            "--until=",
+            "--author=",
+            "--grep=",
+            "-S",
+            "-G",
+            "-n",
+            "--max-count=",
+            "--pretty=",
+            "--format=",
+        ];
+        validate_git_args(&log_args_str, &allowed_exact, &allowed_prefixes)?;
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.worktree_path)
@@ -467,6 +528,10 @@ impl ToolBox {
         let suppress_diff = args["suppress_diff"].as_bool().unwrap_or(false);
         let start_line = args["start_line"].as_u64().map(|v| v as usize);
         let end_line = args["end_line"].as_u64().map(|v| v as usize);
+
+        if object.starts_with('-') {
+            return Err(anyhow!("Invalid object name: {}", object));
+        }
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.worktree_path).arg("show");
@@ -988,6 +1053,85 @@ mod tests {
                 "Creating file in symlinked outside directory should be blocked"
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_git_tools_security() -> Result<()> {
+        let dir = tempdir()?;
+        let repo_path = dir.path().to_path_buf();
+        let toolbox = ToolBox::new(repo_path.clone(), None);
+
+        // Init repo so git commands work
+        Command::new("git")
+            .current_dir(&repo_path)
+            .arg("init")
+            .output()
+            .await?;
+
+        // 1. Test git_diff with safe args
+        let args = json!({
+            "args": ["HEAD^", "HEAD", "--stat"]
+        });
+        let res = toolbox.call("git_diff", args).await;
+        if let Err(e) = res {
+            assert!(!e.to_string().contains("Forbidden git option"));
+        }
+
+        // Test git_diff with forbidden args
+        let args = json!({
+            "args": ["HEAD^", "HEAD", "--output=malicious.txt"]
+        });
+        let res = toolbox.call("git_diff", args).await;
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Forbidden git option: --output=malicious.txt")
+        );
+
+        // 2. Test git_log with safe args
+        let args = json!({
+            "args": ["--oneline", "--since=1.year.ago"]
+        });
+        let res = toolbox.call("git_log", args).await;
+        if let Err(e) = res {
+            assert!(!e.to_string().contains("Forbidden git option"));
+        }
+
+        // Test git_log with forbidden args
+        let args = json!({
+            "args": ["--output=malicious.txt"]
+        });
+        let res = toolbox.call("git_log", args).await;
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Forbidden git option: --output=malicious.txt")
+        );
+
+        // 3. Test git_show with safe object
+        let args = json!({
+            "object": "HEAD:README.md"
+        });
+        let res = toolbox.call("git_show", args).await;
+        if let Err(e) = res {
+            assert!(!e.to_string().contains("Invalid object name"));
+        }
+
+        // Test git_show with forbidden object (starts with -)
+        let args = json!({
+            "object": "--output=malicious.txt"
+        });
+        let res = toolbox.call("git_show", args).await;
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Invalid object name: --output=malicious.txt")
+        );
 
         Ok(())
     }
