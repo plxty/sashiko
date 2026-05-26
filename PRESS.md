@@ -20,6 +20,8 @@ In-depth coverage from the premier Linux news source.
 * [The Sashiko patch-review system](https://lwn.net/Articles/1063292/)
 * [The role of LLMs in patch review](https://lwn.net/Articles/1064830/)
 * [Exelbierd: What's actually in a Sashiko review?](https://lwn.net/Articles/1065971/)
+* [Reviewing kernel patches with LLMs](https://lwn.net/Articles/1073583/)
+* [Dirk and Linus discuss AI and kernel development](https://lwn.net/Articles/1073761/)
 
 ## The Linux Foundation
 * [Linux Foundation on X](https://x.com/linuxfoundation/status/2036497032429305989)
