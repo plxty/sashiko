@@ -25,6 +25,7 @@ pub struct ToolBox {
     worktree_path: PathBuf,
     prompts_path: Option<PathBuf>,
     active_patch_files: Vec<String>,
+    cache: std::sync::RwLock<std::collections::HashMap<String, Value>>,
 }
 
 impl ToolBox {
@@ -33,6 +34,7 @@ impl ToolBox {
             worktree_path,
             prompts_path,
             active_patch_files: Vec::new(),
+            cache: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -201,7 +203,22 @@ impl ToolBox {
 
     pub async fn call(&self, name: &str, args: Value) -> Result<Value> {
         let name_normalized = name.trim().to_lowercase();
-        match name_normalized.as_str() {
+        let should_cache = name_normalized != "todowrite";
+
+        let key = if should_cache {
+            let k = format!("{}:{}", name_normalized, serde_json::to_string(&args)?);
+            {
+                let cache = self.cache.read().unwrap();
+                if let Some(val) = cache.get(&k) {
+                    return Ok(val.clone());
+                }
+            }
+            Some(k)
+        } else {
+            None
+        };
+
+        let res = match name_normalized.as_str() {
             "git_read_files" => self.read_files(args).await,
             "git_blame" => self.git_blame(args).await,
             "git_diff" => self.git_diff(args).await,
@@ -212,7 +229,14 @@ impl ToolBox {
             "git_find_files" => self.find_files(args).await,
             "read_prompt" => self.read_prompt(args).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
+        }?;
+
+        if let Some(k) = key {
+            let mut cache = self.cache.write().unwrap();
+            cache.insert(k, res.clone());
         }
+
+        Ok(res)
     }
 
     async fn read_prompt(&self, args: Value) -> Result<Value> {
@@ -1297,6 +1321,78 @@ mod tests {
         });
         let result = toolbox.call("git_grep", args_regex_fail).await?;
         assert!(result.get("error").is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_toolbox_caching() -> Result<()> {
+        let dir = tempdir()?;
+        let repo_path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["init"])
+            .output()
+            .await?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .await?;
+
+        let file_path = repo_path.join("cache_test.txt");
+        std::fs::write(&file_path, "cached content")?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .output()
+            .await?;
+
+        let toolbox = ToolBox::new(repo_path.clone(), None);
+
+        let args = json!({
+            "revision": "HEAD",
+            "files": [{"path": "cache_test.txt"}],
+            "mode": "raw"
+        });
+
+        let result1 = toolbox.call("git_read_files", args.clone()).await?;
+        let content1 = result1["results"][0]["content"].as_str().unwrap();
+        assert_eq!(content1, "cached content");
+
+        {
+            let cache = toolbox.cache.read().unwrap();
+            assert_eq!(cache.len(), 1);
+        }
+
+        std::fs::remove_file(&file_path)?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["commit", "-m", "Delete file"])
+            .output()
+            .await?;
+
+        let result2 = toolbox.call("git_read_files", args).await?;
+        let content2 = result2["results"][0]["content"].as_str().unwrap();
+        assert_eq!(content2, "cached content");
 
         Ok(())
     }
