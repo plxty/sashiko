@@ -455,6 +455,7 @@ pub struct Worker {
     series_range: Option<String>,
     context_tag: Option<String>,
     stages: Option<Vec<u8>>,
+    action_history: Vec<(String, serde_json::Value)>,
 }
 
 impl Worker {
@@ -474,6 +475,7 @@ impl Worker {
             series_range: config.series_range,
             context_tag: None,
             stages: config.stages,
+            action_history: Vec::new(),
         }
     }
 
@@ -1599,6 +1601,7 @@ Example Output:
         user_prompt: String,
         clean_user_prompt: String,
     ) -> Result<(String, u32, u32, u32)> {
+        self.action_history.clear();
         let mut local_history = Vec::new();
 
         let user_msg = AiMessage {
@@ -1678,13 +1681,35 @@ Example Output:
 
             if let Some(tool_calls) = resp.tool_calls {
                 let mut tool_responses_map = std::collections::HashMap::new();
-                let mut calls_to_run = Vec::with_capacity(tool_calls.len());
+                let mut calls_to_run = Vec::new();
 
                 for call in &tool_calls {
                     let name = call.function_name.clone();
                     let args = call.arguments.clone();
                     let call_id = call.id.clone();
-                    calls_to_run.push((call_id, name, args));
+
+                    let is_duplicate = self
+                        .action_history
+                        .last()
+                        .map(|(last_name, last_args)| last_name == &name && last_args == &args)
+                        .unwrap_or(false);
+
+                    if is_duplicate {
+                        warn!("Blocked duplicate tool call: {} with args {:?}", name, args);
+                        tool_responses_map.insert(call_id.clone(), AiMessage {
+                            role: AiRole::Tool,
+                            content: Some(json!({
+                                "error": "Duplicate tool call blocked. Please change parameters or use a different tool."
+                            }).to_string()),
+                            thought: None,
+                            thought_signature: None,
+                            tool_calls: None,
+                            tool_call_id: Some(call_id),
+                        });
+                    } else {
+                        self.action_history.push((name.clone(), args.clone()));
+                        calls_to_run.push((call_id, name, args));
+                    }
                 }
 
                 let futures: Vec<_> = calls_to_run
@@ -2283,6 +2308,214 @@ mod tests {
             err.downcast_ref::<ReviewError>().is_some(),
             "FormatRejection must downcast to ReviewError"
         );
+    }
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockProviderDuplicateCalls {
+        turn: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ai::AiProvider for MockProviderDuplicateCalls {
+        async fn generate_content(
+            &self,
+            _request: crate::ai::AiRequest,
+        ) -> anyhow::Result<crate::ai::AiResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(crate::ai::AiResponse {
+                    content: None,
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: Some(vec![crate::ai::ToolCall {
+                        id: "call_1".to_string(),
+                        function_name: "git_log".to_string(),
+                        arguments: json!({"revision": "HEAD"}),
+                        thought_signature: None,
+                    }]),
+                    usage: None,
+                })
+            } else if turn == 1 {
+                Ok(crate::ai::AiResponse {
+                    content: None,
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: Some(vec![crate::ai::ToolCall {
+                        id: "call_2".to_string(),
+                        function_name: "git_log".to_string(),
+                        arguments: json!({"revision": "HEAD"}),
+                        thought_signature: None,
+                    }]),
+                    usage: None,
+                })
+            } else {
+                Ok(crate::ai::AiResponse {
+                    content: Some("Done".to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: None,
+                })
+            }
+        }
+        fn estimate_tokens(&self, _request: &crate::ai::AiRequest) -> usize {
+            0
+        }
+        fn get_capabilities(&self) -> crate::ai::ProviderCapabilities {
+            crate::ai::ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    struct MockProviderNonConsecutiveDuplicate {
+        turn: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ai::AiProvider for MockProviderNonConsecutiveDuplicate {
+        async fn generate_content(
+            &self,
+            _request: crate::ai::AiRequest,
+        ) -> anyhow::Result<crate::ai::AiResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                Ok(crate::ai::AiResponse {
+                    content: None,
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: Some(vec![crate::ai::ToolCall {
+                        id: "call_1".to_string(),
+                        function_name: "git_log".to_string(),
+                        arguments: json!({"revision": "HEAD"}),
+                        thought_signature: None,
+                    }]),
+                    usage: None,
+                })
+            } else if turn == 1 {
+                Ok(crate::ai::AiResponse {
+                    content: None,
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: Some(vec![crate::ai::ToolCall {
+                        id: "call_2".to_string(),
+                        function_name: "git_ls".to_string(),
+                        arguments: json!({"revision": "HEAD"}),
+                        thought_signature: None,
+                    }]),
+                    usage: None,
+                })
+            } else if turn == 2 {
+                Ok(crate::ai::AiResponse {
+                    content: None,
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: Some(vec![crate::ai::ToolCall {
+                        id: "call_3".to_string(),
+                        function_name: "git_log".to_string(),
+                        arguments: json!({"revision": "HEAD"}),
+                        thought_signature: None,
+                    }]),
+                    usage: None,
+                })
+            } else {
+                Ok(crate::ai::AiResponse {
+                    content: Some("Done".to_string()),
+                    thought: None,
+                    thought_signature: None,
+                    tool_calls: None,
+                    usage: None,
+                })
+            }
+        }
+        fn estimate_tokens(&self, _request: &crate::ai::AiRequest) -> usize {
+            0
+        }
+        fn get_capabilities(&self) -> crate::ai::ProviderCapabilities {
+            crate::ai::ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_tool_call_blocked() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let provider = std::sync::Arc::new(MockProviderDuplicateCalls {
+            turn: AtomicUsize::new(0),
+        });
+        let tools = crate::worker::tools::ToolBox::new(temp_dir.path().to_path_buf(), None);
+        let prompts = PromptRegistry::new(temp_dir.path().to_path_buf());
+        let config = WorkerConfig {
+            max_input_tokens: 10000,
+            max_interactions: 5,
+            temperature: 0.0,
+            series_range: None,
+            custom_prompt: None,
+            stages: None,
+        };
+        let mut worker = Worker::new(provider, tools, prompts, config);
+
+        let res = worker
+            .run_ai_stage_raw(
+                1,
+                "sys".to_string(),
+                "clean_sys".to_string(),
+                "user".to_string(),
+                "clean_user".to_string(),
+            )
+            .await;
+
+        assert!(res.is_ok());
+
+        let history = &worker.global_history;
+        assert_eq!(history.len(), 7);
+
+        let blocked_msg = &history[5];
+        assert_eq!(blocked_msg.role, AiRole::Tool);
+        let content = blocked_msg.content.as_ref().unwrap();
+        assert!(content.contains("Duplicate tool call blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_non_consecutive_duplicate_allowed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let provider = std::sync::Arc::new(MockProviderNonConsecutiveDuplicate {
+            turn: AtomicUsize::new(0),
+        });
+        let tools = crate::worker::tools::ToolBox::new(temp_dir.path().to_path_buf(), None);
+        let prompts = PromptRegistry::new(temp_dir.path().to_path_buf());
+        let config = WorkerConfig {
+            max_input_tokens: 10000,
+            max_interactions: 5,
+            temperature: 0.0,
+            series_range: None,
+            custom_prompt: None,
+            stages: None,
+        };
+        let mut worker = Worker::new(provider, tools, prompts, config);
+
+        let res = worker
+            .run_ai_stage_raw(
+                1,
+                "sys".to_string(),
+                "clean_sys".to_string(),
+                "user".to_string(),
+                "clean_user".to_string(),
+            )
+            .await;
+
+        assert!(res.is_ok());
+
+        let history = &worker.global_history;
+        assert_eq!(history.len(), 9);
+
+        let response_msg = &history[7];
+        assert_eq!(response_msg.role, AiRole::Tool);
+        let content = response_msg.content.as_ref().unwrap();
+        assert!(!content.contains("Duplicate tool call detected"));
     }
 }
