@@ -1652,6 +1652,7 @@ Example Output:
         let mut t_in = 0;
         let mut t_out = 0;
         let mut t_cached = 0;
+        let mut recitation_retries = 0;
 
         loop {
             turns += 1;
@@ -1672,7 +1673,35 @@ Example Output:
                     .map(|prefix| format!("{} s:{}] ", &prefix[..prefix.len() - 2], _stage)),
             };
 
-            let resp = self.provider.generate_content(request).await?;
+            let resp = match self.provider.generate_content(request).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if (err_msg.contains("RECITATION") || err_msg.contains("blocked"))
+                        && recitation_retries < 3
+                    {
+                        recitation_retries += 1;
+                        tracing::warn!(
+                            "Turn-level recitation block detected. Injecting safety reminder and retrying turn (attempt {}/3)",
+                            recitation_retries
+                        );
+                        let reminder = "IMPORTANT: Your previous response was blocked by a recitation filter. Please ensure you do NOT copy large blocks of code verbatim. Describe logic in prose or simple expressions. Please try generating your response again.";
+                        let reminder_msg = AiMessage {
+                            role: AiRole::User,
+                            content: Some(reminder.to_string()),
+                            thought: None,
+                            thought_signature: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        };
+                        local_history.push(reminder_msg);
+                        turns = turns.saturating_sub(1);
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             if resp.truncated {
                 return Err(ReviewError::OutputTruncated.into());
