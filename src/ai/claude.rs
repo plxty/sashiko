@@ -14,14 +14,13 @@
 
 use crate::ai::{
     AiErrorClass, AiProvider, AiRequest, AiResponse, AiRole, AiUsage, ClassifyAiError,
-    ProviderCapabilities, ToolCall, classify_status_code, decode_stdio_ai_response,
+    ProviderCapabilities, ToolCall, classify_status_code,
 };
 use crate::utils::redact_secret;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::time::Duration;
 use tracing::info;
 
@@ -667,45 +666,61 @@ impl AiProvider for ClaudeClient {
 
 // --- StdioClaudeClient for IPC ---
 
-pub struct StdioClaudeClient;
+pub struct StdioClaudeClient {
+    registry: std::sync::Arc<crate::ai::IpcRegistry>,
+    writer: std::sync::Arc<crate::ai::AtomicWriter>,
+    reader_started: std::sync::atomic::AtomicBool,
+}
 
-#[async_trait]
-trait GenClaudeClient: Send + Sync {
-    async fn exec_stdio(&self, msg: Value) -> Result<AiResponse> {
-        tokio::task::spawn_blocking(move || -> Result<AiResponse> {
-            use std::io::Write;
-            let mut stdout = std::io::stdout();
-            if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(&msg)?) {
-                eprintln!("Fatal error: parent closed stdout. Exiting. ({})", e);
-                std::process::exit(1);
-            }
-            if let Err(e) = stdout.flush() {
-                eprintln!("Fatal error: failed flushing stdout. Exiting. ({})", e);
-                std::process::exit(1);
-            }
+impl StdioClaudeClient {
+    pub fn new() -> Self {
+        let registry = std::sync::Arc::new(crate::ai::IpcRegistry::new());
+        let writer = std::sync::Arc::new(crate::ai::AtomicWriter::new());
 
-            let stdin = std::io::stdin();
-            let mut line = String::new();
-            if stdin.read_line(&mut line)? == 0 {
-                bail!("Unexpected EOF from stdin waiting for AI response");
-            }
-
-            decode_stdio_ai_response(&line)
-        })
-        .await?
+        Self {
+            registry,
+            writer,
+            reader_started: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 }
 
-impl GenClaudeClient for StdioClaudeClient {}
+impl Default for StdioClaudeClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl AiProvider for StdioClaudeClient {
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
-        let msg = serde_json::json!({
+        if !self
+            .reader_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            crate::ai::start_stdin_reader(self.registry.clone());
+        }
+
+        let tx_id = self.registry.next_id();
+        let envelope = serde_json::json!({
             "type": "ai_request",
+            "tx_id": tx_id,
             "payload": request
         });
-        self.exec_stdio(msg).await
+
+        let line = serde_json::to_string(&envelope)?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.registry.register(tx_id, tx).await;
+
+        self.writer.write_line(&line).await?;
+
+        match rx.await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(remote_err)) => Err(remote_err.into()),
+            Err(_) => Err(anyhow::anyhow!(
+                "IPC channel disconnected waiting for response"
+            )),
+        }
     }
 
     fn estimate_tokens(&self, request: &AiRequest) -> usize {

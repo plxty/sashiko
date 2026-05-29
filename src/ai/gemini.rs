@@ -15,7 +15,7 @@
 use crate::ai::token_budget::TokenBudget;
 use crate::ai::{
     AiErrorClass, AiProvider, AiRequest, AiResponse, AiRole, AiUsage, ClassifyAiError,
-    ProviderCapabilities, ToolCall, classify_status_code, decode_stdio_ai_response,
+    ProviderCapabilities, ToolCall, classify_status_code,
 };
 use crate::utils::redact_secret;
 use anyhow::{Context, Result};
@@ -430,16 +430,61 @@ impl GenAiClient for GeminiClient {
     }
 }
 
-pub struct StdioGeminiClient;
+pub struct StdioGeminiClient {
+    registry: std::sync::Arc<crate::ai::IpcRegistry>,
+    writer: std::sync::Arc<crate::ai::AtomicWriter>,
+    reader_started: std::sync::atomic::AtomicBool,
+}
+
+impl StdioGeminiClient {
+    pub fn new() -> Self {
+        let registry = std::sync::Arc::new(crate::ai::IpcRegistry::new());
+        let writer = std::sync::Arc::new(crate::ai::AtomicWriter::new());
+
+        Self {
+            registry,
+            writer,
+            reader_started: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl Default for StdioGeminiClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl AiProvider for StdioGeminiClient {
     async fn generate_content(&self, request: AiRequest) -> Result<AiResponse> {
-        let msg = json!({
+        if !self
+            .reader_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            crate::ai::start_stdin_reader(self.registry.clone());
+        }
+
+        let tx_id = self.registry.next_id();
+        let envelope = json!({
             "type": "ai_request",
+            "tx_id": tx_id,
             "payload": request
         });
-        self.exec_stdio(msg).await
+
+        let line = serde_json::to_string(&envelope)?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.registry.register(tx_id, tx).await;
+
+        self.writer.write_line(&line).await?;
+
+        match rx.await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(remote_err)) => Err(remote_err.into()),
+            Err(_) => Err(anyhow::anyhow!(
+                "IPC channel disconnected waiting for response"
+            )),
+        }
     }
 
     fn estimate_tokens(&self, request: &AiRequest) -> usize {
@@ -451,32 +496,6 @@ impl AiProvider for StdioGeminiClient {
             model_name: "stdio-gemini".to_string(),
             context_window_size: 1_000_000,
         }
-    }
-}
-
-impl StdioGeminiClient {
-    async fn exec_stdio(&self, msg: Value) -> Result<AiResponse> {
-        tokio::task::spawn_blocking(move || -> Result<AiResponse> {
-            use std::io::Write;
-            let mut stdout = std::io::stdout();
-            if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(&msg)?) {
-                eprintln!("Fatal error: parent closed stdout. Exiting. ({})", e);
-                std::process::exit(1);
-            }
-            if let Err(e) = stdout.flush() {
-                eprintln!("Fatal error: failed flushing stdout. Exiting. ({})", e);
-                std::process::exit(1);
-            }
-
-            let stdin = std::io::stdin();
-            let mut line = String::new();
-            if stdin.read_line(&mut line)? == 0 {
-                anyhow::bail!("Unexpected EOF from stdin waiting for AI response");
-            }
-
-            decode_stdio_ai_response(&line)
-        })
-        .await?
     }
 }
 

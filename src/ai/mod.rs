@@ -202,7 +202,7 @@ impl RemoteAiErrorPayload {
 }
 
 /// Error returned by a remote AI provider through the typed stdio protocol.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("Remote AI Error: {message}")]
 pub struct RemoteAiError {
     pub message: String,
@@ -262,6 +262,7 @@ pub fn classify_ai_error(error: &anyhow::Error) -> AiErrorClass {
 /// Decodes a single line of the stdio AI protocol into an [`AiResponse`].
 ///
 /// Typed error payloads surface as [`RemoteAiError`].
+#[allow(dead_code)]
 pub(crate) fn decode_stdio_ai_response(line: &str) -> Result<AiResponse> {
     let resp_msg: serde_json::Value = serde_json::from_str(line)?;
     match resp_msg["type"].as_str() {
@@ -353,7 +354,7 @@ pub fn create_provider(settings: &Settings) -> Result<Arc<dyn AiProvider>> {
             let model = settings.ai.model.clone();
             Ok(Arc::new(gemini::GeminiClient::new(model)))
         }
-        "stdio-gemini" => Ok(Arc::new(gemini::StdioGeminiClient)),
+        "stdio-gemini" => Ok(Arc::new(gemini::StdioGeminiClient::new())),
         "claude" => {
             let model = settings.ai.model.clone();
             let enable_caching = settings
@@ -378,7 +379,7 @@ pub fn create_provider(settings: &Settings) -> Result<Arc<dyn AiProvider>> {
                 effort,
             )))
         }
-        "stdio-claude" => Ok(Arc::new(claude::StdioClaudeClient)),
+        "stdio-claude" => Ok(Arc::new(claude::StdioClaudeClient::new())),
         #[cfg(feature = "bedrock")]
         "bedrock" => {
             let model = settings.ai.model.clone();
@@ -532,6 +533,168 @@ pub fn scrub_thought_signatures(val: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+// --- Multiplexed IPC Protocol Support ---
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct IpcEnvelope {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub tx_id: u64,
+    pub payload: serde_json::Value,
+}
+
+pub(crate) struct IpcRegistry {
+    next_tx_id: std::sync::atomic::AtomicU64,
+    pending: tokio::sync::Mutex<
+        std::collections::HashMap<
+            u64,
+            tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiError>>,
+        >,
+    >,
+}
+
+impl IpcRegistry {
+    pub fn new() -> Self {
+        Self {
+            next_tx_id: std::sync::atomic::AtomicU64::new(1),
+            pending: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn next_id(&self) -> u64 {
+        self.next_tx_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn register(
+        &self,
+        tx_id: u64,
+        tx: tokio::sync::oneshot::Sender<Result<AiResponse, RemoteAiError>>,
+    ) {
+        let mut map = self.pending.lock().await;
+        if map.insert(tx_id, tx).is_some() {
+            eprintln!(
+                "CRITICAL PROTOCOL ERROR: Duplicate transaction ID {} registered!",
+                tx_id
+            );
+            std::process::exit(1);
+        }
+    }
+
+    pub async fn dispatch(&self, tx_id: u64, result: Result<AiResponse, RemoteAiError>) {
+        let mut map = self.pending.lock().await;
+        if let Some(sender) = map.remove(&tx_id) {
+            let _ = sender.send(result);
+        } else {
+            eprintln!(
+                "CRITICAL PROTOCOL ERROR: Unsolicited response received for tx_id: {}!",
+                tx_id
+            );
+            std::process::exit(1);
+        }
+    }
+
+    pub async fn abort_all(&self, err: RemoteAiError) {
+        let mut map = self.pending.lock().await;
+        for (_tx_id, sender) in map.drain() {
+            let _ = sender.send(Err(err.clone()));
+        }
+    }
+}
+
+impl Default for IpcRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct AtomicWriter {
+    writer: tokio::sync::Mutex<tokio::io::Stdout>,
+}
+
+impl AtomicWriter {
+    pub fn new() -> Self {
+        Self {
+            writer: tokio::sync::Mutex::new(tokio::io::stdout()),
+        }
+    }
+
+    pub async fn write_line(&self, line: &str) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut lock = self.writer.lock().await;
+        lock.write_all(line.as_bytes()).await?;
+        lock.write_all(b"\n").await?;
+        lock.flush().await?;
+        Ok(())
+    }
+}
+
+impl Default for AtomicWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) fn start_stdin_reader(registry: std::sync::Arc<IpcRegistry>) {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdin = tokio::io::stdin();
+        let reader = BufReader::new(stdin);
+        let mut lines = reader.lines();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(envelope) = serde_json::from_str::<IpcEnvelope>(&line) {
+                match envelope.msg_type.as_str() {
+                    "ai_response" => {
+                        if let Ok(payload) = serde_json::from_value::<AiResponse>(envelope.payload)
+                        {
+                            registry.dispatch(envelope.tx_id, Ok(payload)).await;
+                        } else {
+                            eprintln!(
+                                "CRITICAL PROTOCOL ERROR: Failed to parse payload as AiResponse for tx_id {}",
+                                envelope.tx_id
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    "error" => {
+                        if let Ok(payload) =
+                            serde_json::from_value::<RemoteAiErrorPayload>(envelope.payload)
+                        {
+                            registry
+                                .dispatch(envelope.tx_id, Err(payload.into_error()))
+                                .await;
+                        } else {
+                            eprintln!(
+                                "CRITICAL PROTOCOL ERROR: Failed to parse payload as RemoteAiErrorPayload for tx_id {}",
+                                envelope.tx_id
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    unknown => {
+                        eprintln!("CRITICAL PROTOCOL ERROR: Unknown message type: {}", unknown);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!(
+                    "CRITICAL PROTOCOL ERROR: Received malformed JSON on stdin: {}",
+                    line
+                );
+                std::process::exit(1);
+            }
+        }
+
+        registry
+            .abort_all(RemoteAiError {
+                message: "IPC channel disconnected (stdin closed)".to_string(),
+                class: AiErrorClass::Fatal,
+            })
+            .await;
+    });
 }
 
 #[cfg(test)]

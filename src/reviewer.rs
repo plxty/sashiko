@@ -1574,7 +1574,7 @@ async fn run_review_tool(
         });
     }
 
-    let mut stdin = child
+    let stdin = child
         .stdin
         .take()
         .ok_or_else(|| anyhow::anyhow!("No stdin"))?;
@@ -1583,254 +1583,361 @@ async fn run_review_tool(
         .take()
         .ok_or_else(|| anyhow::anyhow!("No stdout"))?;
 
+    let stdin_writer = Arc::new(tokio::sync::Mutex::new(stdin));
+
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::time::Instant as TokioInstant;
     use tokio::time::timeout_at;
 
     // Perform interaction with timeout
-    let mut deadline = TokioInstant::now() + Duration::from_secs(settings.review.timeout_seconds);
+    let deadline = Arc::new(std::sync::Mutex::new(
+        TokioInstant::now() + Duration::from_secs(settings.review.timeout_seconds),
+    ));
 
     let interaction_result =
         async {
             // Send initial payload
             let mut input_str = serde_json::to_string(input_payload)?;
             input_str.push('\n');
-            stdin.write_all(input_str.as_bytes()).await?;
-            stdin.flush().await?;
+            {
+                let mut writer = stdin_writer.lock().await;
+                writer.write_all(input_str.as_bytes()).await?;
+                writer.flush().await?;
+            }
 
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
             let mut final_result: Option<Value> = None;
-            let mut ai_started = false;
-            let mut total_tokens_used: usize = 0;
-            let mut total_output_tokens_used: usize = 0;
-            let mut turn_count = 0u32;
+
+            let ai_started = Arc::new(AtomicBool::new(false));
+            let total_tokens_used = Arc::new(AtomicUsize::new(0));
+            let total_output_tokens_used = Arc::new(AtomicUsize::new(0));
+            let turn_count = Arc::new(AtomicU32::new(0));
+
+            let (abort_tx, mut abort_rx) = tokio::sync::mpsc::channel::<anyhow::Error>(1);
 
             loop {
-                let line_result = match timeout_at(deadline, lines.next_line()).await {
-                    Ok(res) => res,
-                    Err(_) => {
-                        return Err(anyhow::anyhow!(
-                            "Review tool timed out (active time exceeded)"
-                        ));
-                    }
+                let current_deadline = {
+                    let d = deadline.lock().unwrap();
+                    *d
                 };
 
-                let line = match line_result {
-                    Ok(Some(l)) => l,
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("Error reading line from child: {}", e);
-                        break;
+                tokio::select! {
+                    Some(err) = abort_rx.recv() => {
+                        return Err(err);
                     }
-                };
-                // Try to parse as JSON
-                if let Ok(json_msg) = serde_json::from_str::<Value>(&line) {
-                    if let Some(type_str) = json_msg.get("type").and_then(|v| v.as_str()) {
-                        match type_str {
-                            "ai_request" | "ai_request_with_cache" => {
-                                if !ai_started {
-                                    let _ = db
-                                        .update_review_status(
-                                            review_id,
-                                            ReviewStatus::InReview.as_str(),
-                                            None,
-                                        )
-                                        .await;
-                                    ai_started = true;
-                                }
-                                if let Some(payload_val) = json_msg.get("payload")
-                                    && let Ok(req) =
-                                        serde_json::from_value::<AiRequest>(payload_val.clone())
-                                {
-                                    // Update tool usages telemetry with actual output lengths from incoming tool response messages.
-                                    let mut tool_calls_map = std::collections::HashMap::new();
-                                    for msg in &req.messages {
-                                        if let Some(ref calls) = msg.tool_calls {
-                                            for call in calls {
-                                                tool_calls_map.insert(
-                                                    call.id.clone(),
-                                                    (call.function_name.clone(), call.arguments.to_string()),
-                                                );
-                                            }
-                                        }
-                                    }
+                    line_res = timeout_at(current_deadline, lines.next_line()) => {
+                        let line_result = match line_res {
+                            Ok(res) => res,
+                            Err(_) => {
+                                return Err(anyhow::anyhow!(
+                                    "Review tool timed out (active time exceeded)"
+                                ));
+                            }
+                        };
 
-                                    for msg in &req.messages {
-                                        if msg.role == crate::ai::AiRole::Tool
-                                            && let Some(ref tool_call_id) = msg.tool_call_id
-                                            && let Some((tool_name, arguments)) = tool_calls_map.get(tool_call_id)
-                                            && let Some(ref content) = msg.content
-                                        {
+                        let line = match line_result {
+                            Ok(Some(l)) => l,
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::error!("Error reading line from child: {}", e);
+                                break;
+                            }
+                        };
+
+                        // Try to parse as JSON
+                        if let Ok(json_msg) = serde_json::from_str::<Value>(&line) {
+                            if let Some(type_str) = json_msg.get("type").and_then(|v| v.as_str()) {
+                                match type_str {
+                                    "ai_request" | "ai_request_with_cache" => {
+                                        if !ai_started.load(Ordering::SeqCst) {
                                             let _ = db
-                                                .update_tool_usage_length(
+                                                .update_review_status(
                                                     review_id,
-                                                    tool_name,
-                                                    arguments,
-                                                    content.len(),
+                                                    ReviewStatus::InReview.as_str(),
+                                                    None,
                                                 )
                                                 .await;
-                                        }
-                                    }
-
-                                    turn_count += 1;
-                                    if settings.ai.log_turns {
-                                        let n_msgs = req.messages.len();
-                                        let last = req.messages.last();
-                                        let role_str = last.map(|m| format!("{:?}", m.role).to_lowercase()).unwrap_or_default();
-                                        let content_preview = last.and_then(|m| m.content.as_deref()).unwrap_or("(no text content)");
-                                        let preview: String = content_preview.chars().take(300).collect();
-                                        let ellipsis = if content_preview.chars().count() > 300 { "…" } else { "" };
-                                        if let Some(tool_calls) = last.and_then(|m| m.tool_calls.as_ref()) {
-                                            let names: Vec<&str> = tool_calls.iter().map(|t| t.function_name.as_str()).collect();
-                                            info!("→ Turn {} ({} msgs): [{role_str}] tool_calls={:?}", turn_count, n_msgs, names);
-                                        } else {
-                                            info!("→ Turn {} ({} msgs): [{role_str}] {}{}", turn_count, n_msgs, preview, ellipsis);
-                                        }
-                                    }
-                                    let ctx_tag = req.context_tag.clone().unwrap_or_default();
-                                    let resp_payload = crate::ai::LOG_CONTEXT.scope(ctx_tag, async {
-                                    let mut local_transient_errors = 0;
-                                    loop {
-                                        let slept = quota_manager.wait_for_access().await;
-                                        deadline += slept;
-
-                                        if TokioInstant::now() > deadline {
-                                            break Err(anyhow::anyhow!(
-                                                "Review tool timed out (active time exceeded)"
-                                            ));
+                                            ai_started.store(true, Ordering::SeqCst);
                                         }
 
-                                        match provider.generate_content(req.clone()).await {
-                                            Ok(resp) => {
-                                                quota_manager.report_success().await;
-                                                break Ok(resp);
-                                            }
-                                            Err(e) => {
-                                                match classify_ai_error(&e) {
-                                                    AiErrorClass::RateLimit { retry_after } => {
-                                                        quota_manager
-                                                            .report_quota_error(retry_after)
-                                                            .await;
-                                                        continue;
-                                                    }
-                                                    AiErrorClass::Transient { retry_after } => {
-                                                        local_transient_errors += 1;
-                                                        let backoff_secs = (1.0 * (2.0_f64.powi(local_transient_errors - 1))).min(60.0);
-                                                        let backoff = std::time::Duration::from_secs_f64(backoff_secs).max(retry_after);
-                                                        tracing::warn!(
-                                                            "AI provider transient error (streak: {}). Locally backing off for {:.2}s",
-                                                            local_transient_errors,
-                                                            backoff.as_secs_f64()
+                                        let tx_id = json_msg.get("tx_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let payload = json_msg["payload"].clone();
+
+                                        let db_clone = db.clone();
+                                        let provider_clone = provider.clone();
+                                        let quota_clone = quota_manager.clone();
+                                        let settings_clone = settings.clone();
+                                        let stdin_clone = stdin_writer.clone();
+                                        let deadline_clone = deadline.clone();
+                                        let turn_count_clone = turn_count.clone();
+                                        let total_tokens_used_clone = total_tokens_used.clone();
+                                        let total_output_tokens_used_clone = total_output_tokens_used.clone();
+                                        let abort_tx_clone = abort_tx.clone();
+
+                                        tokio::spawn(async move {
+                                            let req: AiRequest = match serde_json::from_value(payload) {
+                                                Ok(r) => r,
+                                                Err(e) => {
+                                                    let _ = abort_tx_clone.send(anyhow::anyhow!("Failed to parse AiRequest payload: {}", e)).await;
+                                                    return;
+                                                }
+                                            };
+
+                                            let mut tool_calls_map = std::collections::HashMap::new();
+                                            for msg in &req.messages {
+                                                if let Some(ref calls) = msg.tool_calls {
+                                                    for call in calls {
+                                                        tool_calls_map.insert(
+                                                            call.id.clone(),
+                                                            (call.function_name.clone(), call.arguments.to_string()),
                                                         );
-                                                        tokio::time::sleep(backoff).await;
-                                                        continue;
                                                     }
-                                                    AiErrorClass::Fatal => break Err(e),
                                                 }
                                             }
-                                        }
-                                    }
-                                }).await;
 
-                                    let reply = match resp_payload {
-                                        Ok(p) => {
-                                            if let Some(usage) = &p.usage {
-                                                let cached = usage.cached_tokens.unwrap_or(0);
-                                                let uncached_input = usage.prompt_tokens.saturating_sub(cached);
-                                                total_tokens_used += uncached_input + usage.completion_tokens;
-                                                total_output_tokens_used += usage.completion_tokens;
-                                                let token_budget = settings.review.max_total_tokens;
-                                                if token_budget > 0 && total_tokens_used > token_budget {
-                                                    error!("Token budget exceeded: {} uncached input + output tokens used > {} limit — aborting review",
-                                                        total_tokens_used, token_budget);
-                                                    return Err(ReviewError::BudgetExceeded(
-                                                        format!("Token budget exceeded: {} uncached input + output tokens used (limit: {})",
-                                                            total_tokens_used, token_budget)
-                                                    ).into());
-                                                }
-                                                let output_budget = settings.review.max_total_output_tokens;
-                                                if output_budget > 0 && total_output_tokens_used > output_budget {
-                                                    error!("Output token budget exceeded: {} output tokens used > {} limit — aborting review",
-                                                        total_output_tokens_used, output_budget);
-                                                    return Err(ReviewError::BudgetExceeded(
-                                                        format!("Output token budget exceeded: {} output tokens used (limit: {})",
-                                                            total_output_tokens_used, output_budget)
-                                                    ).into());
-                                                }
-                                            }
-                                            if settings.ai.log_turns {
-                                                if let Some(content) = &p.content {
-                                                    let preview: String = content.chars().take(500).collect();
-                                                    let ellipsis = if content.chars().count() > 500 { "…" } else { "" };
-                                                    info!("← Turn {} text: {}{}", turn_count, preview, ellipsis);
-                                                }
-                                                if let Some(tool_calls) = &p.tool_calls {
-                                                    for call in tool_calls {
-                                                        let args_str = call.arguments.to_string();
-                                                        let args_preview: String = args_str.chars().take(200).collect();
-                                                        let ellipsis = if args_str.chars().count() > 200 { "…" } else { "" };
-                                                        info!("← Turn {} tool_call: {}({}{})", turn_count, call.function_name, args_preview, ellipsis);
-                                                    }
-                                                }
-                                                if let Some(usage) = &p.usage {
-                                                    info!("← Turn {} tokens: in={} out={} cached={}",
-                                                        turn_count, usage.prompt_tokens, usage.completion_tokens,
-                                                        usage.cached_tokens.unwrap_or(0));
-                                                }
-                                            }
-                                            if let Some(tool_calls) = &p.tool_calls {
-                                                for call in tool_calls {
-                                                    let _ = db
-                                                        .create_tool_usage(crate::db::ToolUsage {
+                                            for msg in &req.messages {
+                                                if msg.role == crate::ai::AiRole::Tool
+                                                    && let Some(ref tool_call_id) = msg.tool_call_id
+                                                    && let Some((tool_name, arguments)) = tool_calls_map.get(tool_call_id)
+                                                    && let Some(ref content) = msg.content
+                                                {
+                                                    let _ = db_clone
+                                                        .update_tool_usage_length(
                                                             review_id,
-                                                            provider: settings.ai.provider.clone(),
-                                                            model: settings.ai.model.clone(),
-                                                            tool_name: call.function_name.clone(),
-                                                            arguments: Some(
-                                                                call.arguments.to_string(),
-                                                            ),
-                                                            output_length: 0,
-                                                        })
+                                                            tool_name,
+                                                            arguments,
+                                                            content.len(),
+                                                        )
                                                         .await;
                                                 }
                                             }
-                                            json!({ "type": "ai_response", "payload": p })
-                                        }
-                                        Err(e) => {
-                                            let message = e.to_string();
-                                            let class = classify_ai_error(&e);
-                                            let payload = RemoteAiErrorPayload::new(message, class);
-                                            json!({ "type": "error", "payload": payload })
-                                        }
-                                    };
-                                    let mut reply_str = serde_json::to_string(&reply)?;
-                                    reply_str.push('\n');
-                                    if let Err(e) = stdin.write_all(reply_str.as_bytes()).await {
-                                        error!("Failed to write AI response to child: {}", e);
-                                        break;
+
+                                            let mut local_turn = turn_count_clone.fetch_add(1, Ordering::SeqCst);
+                                            local_turn += 1;
+
+                                            if settings_clone.ai.log_turns {
+                                                let n_msgs = req.messages.len();
+                                                let last = req.messages.last();
+                                                let role_str = last.map(|m| format!("{:?}", m.role).to_lowercase()).unwrap_or_default();
+                                                let content_preview = last.and_then(|m| m.content.as_deref()).unwrap_or("(no text content)");
+                                                let preview: String = content_preview.chars().take(300).collect();
+                                                let ellipsis = if content_preview.chars().count() > 300 { "…" } else { "" };
+                                                if let Some(tool_calls) = last.and_then(|m| m.tool_calls.as_ref()) {
+                                                    let names: Vec<&str> = tool_calls.iter().map(|t| t.function_name.as_str()).collect();
+                                                    info!("→ Turn {} ({} msgs): [{role_str}] tool_calls={:?}", local_turn, n_msgs, names);
+                                                } else {
+                                                    info!("→ Turn {} ({} msgs): [{role_str}] {}{}", local_turn, n_msgs, preview, ellipsis);
+                                                }
+                                            }
+
+                                            let ctx_tag = req.context_tag.clone().unwrap_or_default();
+                                            let resp_payload = crate::ai::LOG_CONTEXT.scope(ctx_tag, async {
+                                                let mut local_transient_errors = 0;
+                                                loop {
+                                                    let slept = quota_clone.wait_for_access().await;
+                                                    {
+                                                        let mut d = deadline_clone.lock().unwrap();
+                                                        *d += slept;
+                                                    }
+
+                                                    let current_deadline = {
+                                                        let d = deadline_clone.lock().unwrap();
+                                                        *d
+                                                    };
+
+                                                    if TokioInstant::now() > current_deadline {
+                                                        return Err(anyhow::anyhow!(
+                                                            "Review tool timed out (active time exceeded)"
+                                                        ));
+                                                    }
+
+                                                    match provider_clone.generate_content(req.clone()).await {
+                                                        Ok(resp) => {
+                                                            quota_clone.report_success().await;
+                                                            break Ok(resp);
+                                                        }
+                                                        Err(e) => {
+                                                            match classify_ai_error(&e) {
+                                                                AiErrorClass::RateLimit { retry_after } => {
+                                                                    quota_clone
+                                                                        .report_quota_error(retry_after)
+                                                                        .await;
+                                                                    continue;
+                                                                }
+                                                                AiErrorClass::Transient { retry_after } => {
+                                                                    local_transient_errors += 1;
+                                                                    let backoff_secs = (1.0 * (2.0_f64.powi(local_transient_errors - 1))).min(60.0);
+                                                                    let backoff = std::time::Duration::from_secs_f64(backoff_secs).max(retry_after);
+                                                                    tracing::warn!(
+                                                                        "AI provider transient error (streak: {}). Locally backing off for {:.2}s",
+                                                                        local_transient_errors,
+                                                                        backoff.as_secs_f64()
+                                                                    );
+                                                                    tokio::time::sleep(backoff).await;
+                                                                    continue;
+                                                                }
+                                                                AiErrorClass::Fatal => break Err(e),
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }).await;
+
+                                            let reply = match resp_payload {
+                                                Ok(p) => {
+                                                    if let Some(usage) = &p.usage {
+                                                        let cached = usage.cached_tokens.unwrap_or(0);
+                                                        let uncached_input = usage.prompt_tokens.saturating_sub(cached);
+                                                        let current_total = total_tokens_used_clone.fetch_add(uncached_input + usage.completion_tokens, Ordering::SeqCst) + uncached_input + usage.completion_tokens;
+                                                        let current_output = total_output_tokens_used_clone.fetch_add(usage.completion_tokens, Ordering::SeqCst) + usage.completion_tokens;
+                                                        let token_budget = settings_clone.review.max_total_tokens;
+                                                        if token_budget > 0 && current_total > token_budget {
+                                                            let err_msg = format!("Token budget exceeded: {} uncached input + output tokens used > {} limit", current_total, token_budget);
+
+                                                            let payload = RemoteAiErrorPayload::new(err_msg.clone(), AiErrorClass::Fatal);
+                                                            let reply = json!({
+                                                                "type": "error",
+                                                                "tx_id": tx_id,
+                                                                "payload": payload
+                                                            });
+                                                            let mut reply_str = serde_json::to_string(&reply).unwrap();
+                                                            reply_str.push('\n');
+                                                            {
+                                                                let mut writer = stdin_clone.lock().await;
+                                                                let _ = writer.write_all(reply_str.as_bytes()).await;
+                                                                let _ = writer.flush().await;
+                                                            }
+
+                                                            let _ = abort_tx_clone.send(ReviewError::BudgetExceeded(err_msg).into()).await;
+                                                            return;
+                                                        }
+
+                                                        let output_budget = settings_clone.review.max_total_output_tokens;
+                                                        if output_budget > 0 && current_output > output_budget {
+                                                            let err_msg = format!("Output token budget exceeded: {} output tokens used > {} limit", current_output, output_budget);
+
+                                                            let payload = RemoteAiErrorPayload::new(err_msg.clone(), AiErrorClass::Fatal);
+                                                            let reply = json!({
+                                                                "type": "error",
+                                                                "tx_id": tx_id,
+                                                                "payload": payload
+                                                            });
+                                                            let mut reply_str = serde_json::to_string(&reply).unwrap();
+                                                            reply_str.push('\n');
+                                                            {
+                                                                let mut writer = stdin_clone.lock().await;
+                                                                let _ = writer.write_all(reply_str.as_bytes()).await;
+                                                                let _ = writer.flush().await;
+                                                            }
+
+                                                            let _ = abort_tx_clone.send(ReviewError::BudgetExceeded(err_msg).into()).await;
+                                                            return;
+                                                        }
+                                                    }
+
+                                                    if settings_clone.ai.log_turns {
+                                                        if let Some(content) = &p.content {
+                                                            let preview: String = content.chars().take(500).collect();
+                                                            let ellipsis = if content.chars().count() > 500 { "…" } else { "" };
+                                                            info!("← Turn {} text: {}{}", local_turn, preview, ellipsis);
+                                                        }
+                                                        if let Some(tool_calls) = &p.tool_calls {
+                                                            for call in tool_calls {
+                                                                let args_str = call.arguments.to_string();
+                                                                let args_preview: String = args_str.chars().take(200).collect();
+                                                                let ellipsis = if args_str.chars().count() > 200 { "…" } else { "" };
+                                                                info!("← Turn {} tool_call: {}({}{})", local_turn, call.function_name, args_preview, ellipsis);
+                                                            }
+                                                        }
+                                                        if let Some(usage) = &p.usage {
+                                                            info!("← Turn {} tokens: in={} out={} cached={}",
+                                                                local_turn, usage.prompt_tokens, usage.completion_tokens,
+                                                                usage.cached_tokens.unwrap_or(0));
+                                                        }
+                                                    }
+
+                                                    if let Some(tool_calls) = &p.tool_calls {
+                                                        for call in tool_calls {
+                                                            let _ = db_clone
+                                                                .create_tool_usage(crate::db::ToolUsage {
+                                                                    review_id,
+                                                                    provider: settings_clone.ai.provider.clone(),
+                                                                    model: settings_clone.ai.model.clone(),
+                                                                    tool_name: call.function_name.clone(),
+                                                                    arguments: Some(
+                                                                        call.arguments.to_string(),
+                                                                    ),
+                                                                    output_length: 0,
+                                                                })
+                                                                .await;
+                                                        }
+                                                    }
+
+                                                    Some(json!({
+                                                        "type": "ai_response",
+                                                        "tx_id": tx_id,
+                                                        "payload": p
+                                                    }))
+                                                }
+                                                Err(e) => {
+                                                    let class = classify_ai_error(&e);
+                                                    let message = e.to_string();
+                                                    let payload = RemoteAiErrorPayload::new(message, class);
+                                                    let reply = json!({
+                                                        "type": "error",
+                                                        "tx_id": tx_id,
+                                                        "payload": payload
+                                                    });
+
+                                                    let mut reply_str = serde_json::to_string(&reply).unwrap();
+                                                    reply_str.push('\n');
+                                                    {
+                                                        let mut writer = stdin_clone.lock().await;
+                                                        if let Err(e) = writer.write_all(reply_str.as_bytes()).await {
+                                                            error!("Failed to write AI response to child: {}", e);
+                                                        }
+                                                        let _ = writer.flush().await;
+                                                    }
+
+                                                    None
+                                                }
+                                            };
+
+                                            if let Some(reply) = reply {
+                                                let mut reply_str = serde_json::to_string(&reply).unwrap();
+                                                reply_str.push('\n');
+                                                {
+                                                    let mut writer = stdin_clone.lock().await;
+                                                    if let Err(e) = writer.write_all(reply_str.as_bytes()).await {
+                                                        error!("Failed to write AI response to child: {}", e);
+                                                    }
+                                                    let _ = writer.flush().await;
+                                                }
+                                            }
+                                        });
                                     }
-                                    let _ = stdin.flush().await;
+                                    _ => {
+                                        // Unknown type. Assume it's result if it matches result structure.
+                                        if json_msg.get("patchset_id").is_some() {
+                                            final_result = Some(json_msg);
+                                            break;
+                                        }
+                                    }
                                 }
-                            }
-                            _ => {
-                                // Unknown type. Assume it's result if it matches result structure.
+                            } else {
+                                // No type. Result?
                                 if json_msg.get("patchset_id").is_some() {
                                     final_result = Some(json_msg);
                                     break;
                                 }
                             }
-                        }
-                    } else {
-                        // No type. Result?
-                        if json_msg.get("patchset_id").is_some() {
-                            final_result = Some(json_msg);
-                            break;
+                        } else {
+                            // Non-JSON line. Log it.
+                            warn!("Review tool stdout: {}", line);
                         }
                     }
-                } else {
-                    // Non-JSON line. Log it.
-                    warn!("Review tool stdout: {}", line);
                 }
             }
 
@@ -1843,9 +1950,10 @@ async fn run_review_tool(
         }
         .await;
 
-    // Handle timeout and child process cleanup
-    // Interaction finished (Success or Error inside interaction)
-    drop(stdin); // Close stdin to signal EOF/finish to child if it's still running
+    {
+        let mut writer = stdin_writer.lock().await;
+        let _ = writer.shutdown().await;
+    }
     let _ = child.wait().await; // Reap zombie
 
     match interaction_result {
