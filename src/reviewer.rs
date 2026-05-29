@@ -41,6 +41,7 @@ use tracing::{error, info, warn};
 #[derive(Clone)]
 struct ReviewContext {
     semaphore: Arc<Semaphore>,
+    llm_semaphore: Arc<Semaphore>,
     db: Arc<Database>,
     settings: Settings,
     baseline_registry: Arc<BaselineRegistry>,
@@ -67,7 +68,7 @@ fn generate_id() -> String {
     let since_the_epoch = start
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards");
-    format!("{:x}-{:x}", since_the_epoch.as_micros(), std::process::id())
+    format!("rev_{}", since_the_epoch.as_millis())
 }
 
 /// The `Reviewer` service orchestrates the review process for patchsets.
@@ -81,6 +82,7 @@ pub struct Reviewer {
     db: Arc<Database>,
     settings: Settings,
     semaphore: Arc<Semaphore>,
+    llm_semaphore: Arc<Semaphore>,
     baseline_registry: Arc<BaselineRegistry>,
     quota_manager: Arc<QuotaManager>,
     provider: Arc<dyn AiProvider>,
@@ -122,10 +124,18 @@ impl Reviewer {
         .await
         .expect("Failed to create AI provider");
 
+        // Mathematically derived from Sashiko's review pipeline stage composition:
+        // Stages 1-7 run in parallel (7 slots), while Stages 8-11 run sequentially (1 slot).
+        // On average, an active patch review consumes ~3 LLM slots over its execution lifetime.
+        // Thus, the global LLM request semaphore is scaled to (concurrency * 3) to fully
+        // saturate LLM capacity while gating local processes/worktrees strictly to `concurrency`.
+        let llm_concurrency = std::cmp::max(1, concurrency * 3);
+
         Self {
             db,
             settings,
             semaphore: Arc::new(Semaphore::new(concurrency)),
+            llm_semaphore: Arc::new(Semaphore::new(llm_concurrency)),
             baseline_registry,
             quota_manager: Arc::new(QuotaManager::new()),
             provider,
@@ -201,6 +211,7 @@ impl Reviewer {
 
             let context = ReviewContext {
                 semaphore: self.semaphore.clone(),
+                llm_semaphore: self.llm_semaphore.clone(),
                 db: self.db.clone(),
                 settings: self.settings.clone(),
                 baseline_registry: self.baseline_registry.clone(),
@@ -246,6 +257,7 @@ impl Reviewer {
 
             let context = ReviewContext {
                 semaphore: self.semaphore.clone(),
+                llm_semaphore: self.llm_semaphore.clone(),
                 db: self.db.clone(),
                 settings: self.settings.clone(),
                 baseline_registry: self.baseline_registry.clone(),
@@ -1125,6 +1137,7 @@ impl Reviewer {
                 review_id,
                 worktree_path,
                 ctx.provider.clone(),
+                ctx.llm_semaphore.clone(),
             )
             .await;
 
@@ -1465,6 +1478,7 @@ async fn run_review_tool(
     review_id: i64,
     worktree_path: Option<&Path>,
     provider: Arc<dyn AiProvider>,
+    llm_semaphore: Arc<Semaphore>,
 ) -> Result<serde_json::Value> {
     let mut cmd = if let Some(ref override_bin) = settings.review.review_tool_override {
         Command::new(override_bin)
@@ -1675,6 +1689,7 @@ async fn run_review_tool(
                                         let total_tokens_used_clone = total_tokens_used.clone();
                                         let total_output_tokens_used_clone = total_output_tokens_used.clone();
                                         let abort_tx_clone = abort_tx.clone();
+                                        let llm_semaphore_clone = llm_semaphore.clone();
 
                                         tokio::spawn(async move {
                                             let req: AiRequest = match serde_json::from_value(payload) {
@@ -1752,6 +1767,8 @@ async fn run_review_tool(
                                                             "Review tool timed out (active time exceeded)"
                                                         ));
                                                     }
+
+                                                    let _permit = llm_semaphore_clone.acquire().await?;
 
                                                     match provider_clone.generate_content(req.clone()).await {
                                                         Ok(resp) => {
@@ -2536,6 +2553,7 @@ mod tests {
             review_id,
             None,
             provider,
+            Arc::new(Semaphore::new(56)),
         )
         .await
     }
@@ -2706,6 +2724,7 @@ fi
 
         let ctx = ReviewContext {
             semaphore: Arc::new(Semaphore::new(1)),
+            llm_semaphore: Arc::new(Semaphore::new(56)),
             db: db.clone(),
             settings: settings.clone(),
             baseline_registry: Arc::new(BaselineRegistry::new(Path::new("."), None).unwrap()),
@@ -2993,6 +3012,7 @@ echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
             review_id,
             None,
             provider,
+            Arc::new(Semaphore::new(56)),
         )
         .await
         .map(|_| ())
@@ -3104,6 +3124,7 @@ echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
 
         let ctx = ReviewContext {
             semaphore: Arc::new(Semaphore::new(1)),
+            llm_semaphore: Arc::new(Semaphore::new(56)),
             db: db.clone(),
             settings,
             baseline_registry: Arc::new(
