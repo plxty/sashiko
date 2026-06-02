@@ -98,8 +98,20 @@ the code behaves a certain way, you MUST verify against the actual implementatio
    - Output: quote function X's implementation showing it guarantees the claimed behavior
 
 4. **When in doubt, report the issue**
-   - If you cannot verify the comment matches the implementation under all configs, report it
-   - A bug dismissed based on incorrect documentation is worse than a false positive
+    - If you cannot verify the comment matches the implementation under all configs, report it
+    - A bug dismissed based on incorrect documentation is worse than a false positive
+
+### 3.2. Subsystem & Hardware Invariants (MANDATORY)
+**Before flagging missing input/bounds validation or error-pointer checks, verify if the subsystem's invariants render the issue impossible:**
+- **Subsystem Pre-Validation Engine & Tooling Guarantees:** Does the subsystem or the language/compiler tooling ecosystem (e.g., BPF's verifier, Rust's compiler safety constraints, Sparse annotations, lockdep, or device tree schemas) statically or dynamically guarantee that the safety invariant is enforced? If so, do not suggest redundant manual checks.
+- **Architecture & Context Constraints:** Is the flagged issue (e.g., unaligned memory access or 32-bit register layout corruption) only physically possible on hardware architectures that are irrelevant to or unsupported by the target subsystem or driver?
+- **Intentional Error Pointers:** Do not flag callee functions for returning standard kernel error pointers (e.g., `ERR_PTR(-ENOENT)` or `ERR_PTR(-ENOMEM)`) instead of NULL. Returning an `ERR_PTR` is a standard, deliberate design pattern in the Linux kernel to propagate specific failure codes. (However, always verify that the *callers* of such functions properly validate the returned value using `IS_ERR()` or `IS_ERR_OR_NULL()`).
+- **Hardware Quirks:** Is the flagged sequence (e.g., writing to registers in a seemingly "wrong" order or after sleep) explicitly required by the hardware specification?
+
+*Output Verification:*
+- Subsystem invariants checked: [ list invariants or "none" ]
+- Verifier/compiler guarantees found: [ list guarantees or "none" ]
+- Rationale for discarding/reporting: [ write brief explanation ]
 
 ### 4. Locking False Positives
 **Before reporting** a locking issue:
@@ -116,6 +128,16 @@ the code behaves a certain way, you MUST verify against the actual implementatio
 - Missing that caller holds the required lock
 - Not recognizing RCU-protected sections
 - Assuming all shared data needs traditional locks
+
+### 4.1. Lifecycle Concurrency & Serialization
+**Do not report concurrency issues (data races, locking violations, Use-After-Free) in serialized lifecycle functions:**
+- **Initialization Phase:** Functions like `probe()`, `setup()`, `init()`, and early boot initialization. During these phases, the device is not yet registered or visible to userspace/network/client drivers, meaning concurrent access is structurally impossible.
+- **Teardown Phase:** Functions like `shutdown()`, `remove()`, or final cleanup callbacks. These are typically serialized by the driver core, and parent subsystems (like the PCI core) have already disabled DMA and interrupts.
+- **Parent Subsystem/Bus Protection:** Check if the parent bus core (e.g., PCI, USB, platform bus, or driver core) automatically handles resource teardown, state resets, or cleanup (such as disabling DMA, clearing bus mastering, or freeing devm-managed memory) rendering explicit local driver cleanup redundant.
+
+*Output Verification:*
+- Function execution phase: [ e.g., probe, normal runtime, shutdown ]
+- Proof of concurrent access path: [ quote concurrent thread spawn, or write "serialized lifecycle - no race possible" ]
 
 ### 5. Use-After-Free Confusion
 **Distinguish between**:
@@ -186,6 +208,16 @@ the dismissal is invalid. Report the race.
 - Commit message explains the performance impact
 - Simplicity/maintainability was prioritized
 - It's optimizing for a different use case
+
+### 9.1. Practical Severity vs. Theoretical Pathology
+**Do not waste developer time with theoretical, non-impactful bugs:**
+- **Complexity Trade-offs:** Do not flag O(N^2) or high-complexity algorithms in helper, test, or setup code if they are chosen for simplicity and cannot be abused by untrusted input to cause a DoS.
+- **Practically Bounded Values:** Do not flag potential overflows on variables that are practically bounded (e.g., NUMA node IDs, CPUs, or hardware channels that will never exceed limits in real-world systems).
+- **Security Privilege Boundary Equivalence:** Do not flag minor information leaks if the receiving context already possesses equivalent or higher privileges that allow reading/writing that memory anyway (e.g., leaking a kernel memory address or stack structure to a context that already has native kernel-level read privileges).
+
+*Output Verification:*
+- Practical impact of worst-case: [ e.g., "negligible", "DoS risk", "no impact" ]
+- Security boundary violated: [ e.g., "none - context has read_kernel privilege", "yes - user-space leak" ]
 
 ### 10. Intentional backwards compatibility
 - Leaving stub sysfs or procfs files is not required, and also not a regression
