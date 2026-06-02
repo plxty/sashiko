@@ -49,8 +49,9 @@ impl ToolBox {
             return r.to_string();
         };
         static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let re = RE.get_or_init(|| regex::Regex::new(r"(^|[^/])\bHEAD\b").unwrap());
-        re.replace_all(r, format!("${{1}}{}", vhead)).into_owned()
+        let re = RE.get_or_init(|| regex::Regex::new(r"(^|[^/])\bHEAD($|[~^:.@])").unwrap());
+        re.replace_all(r, format!("${{1}}{}${{2}}", vhead))
+            .into_owned()
     }
 
     pub fn set_active_patch_files(&mut self, files: Vec<String>) {

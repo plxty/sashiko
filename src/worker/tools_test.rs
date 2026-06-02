@@ -56,6 +56,8 @@ mod tests {
             "refs/remotes/origin/HEAD"
         );
         assert_eq!(toolbox.virtualize_ref("FOREHEAD"), "FOREHEAD");
+        assert_eq!(toolbox.virtualize_ref("my-HEAD-branch"), "my-HEAD-branch");
+        assert_eq!(toolbox.virtualize_ref("HEAD-fixes"), "HEAD-fixes");
     }
 
     #[test]
