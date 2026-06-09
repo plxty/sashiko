@@ -209,3 +209,9 @@ cc = ["Marc Kleine-Budde <mkl@pengutronix.de>",
       "Vincent Mailhol <mailhol@kernel.org>",
       "Oleksij Rempel <o.rempel@pengutronix.de>",
       "linux-can@vger.kernel.org"]
+
+[subsystems.linux-scsi]
+lists = ["linux-scsi@vger.kernel.org"]
+reply_to_author = true
+cc = ["linux-scsi@vger.kernel.org"]
+
