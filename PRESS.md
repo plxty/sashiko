@@ -25,9 +25,11 @@ In-depth coverage from the premier Linux news source.
 
 ## The Linux Foundation
 * [Linux Foundation on X](https://x.com/linuxfoundation/status/2036497032429305989)
+* [Open Source Summit NA 2026 Keynote: Linus Torvalds & Dirk Hohndel](https://youtu.be/fi29pfLcW4I?si=xky2533_zmsrtW-G&t=1414) (discussing AI in kernel development)
 
 ## Major Tech News
 Coverage in widely read technical publications.
+* **The New Stack:** [Why Linux creator Linus Torvalds gets angry hearing "99% of code is AI"](https://thenewstack.io/torvalds-ai-programming-productivity/)
 * **The Register:** [Sashiko code review linux](https://www.theregister.com/2026/03/20/sashiko_code_review_linux/)
 * **The Register:** [Greg Kroah-Hartman AI kernel](https://www.theregister.com/2026/03/26/greg_kroahhartman_ai_kernel/)
 * **Phoronix:** [Sashiko Linux AI Code Review](https://www.phoronix.com/news/Sashiko-Linux-AI-Code-Review)
