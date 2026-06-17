@@ -5,3 +5,4 @@ resources:
   - sashiko-ingress.yaml
   - sashiko-service-skeleton.yaml
   - maintenance-setup.yaml
+  - managed-certificate.yaml
