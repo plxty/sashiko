@@ -47,7 +47,7 @@ impl GitSyncWorker {
         let remotes: Vec<&str> = remotes_str
             .lines()
             .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
+            .filter(|l| !l.is_empty() && !l.starts_with("fetcher-"))
             .collect();
 
         info!("GitSyncWorker: Found {} remotes to check.", remotes.len());
