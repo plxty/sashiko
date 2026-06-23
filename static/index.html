@@ -1224,9 +1224,23 @@
                 let blocks = [];
                 let currentBlock = null;
                 
+                const flushCurrentBlock = () => {
+                    if (currentBlock) {
+                        let trailingEmpty = [];
+                        while (currentBlock.items.length > 0 && currentBlock.items[currentBlock.items.length - 1].type === 'EMPTY') {
+                            trailingEmpty.unshift(currentBlock.items.pop());
+                        }
+                        currentBlock = null;
+                        trailingEmpty.forEach(e => blocks.push({ type: 'EMPTY', item: e }));
+                    }
+                };
+                
                 for (let i = 0; i < classified.length; i++) {
                     const item = classified[i];
                     if (item.type === 'TEXT') {
+                        if (item.severity) {
+                            flushCurrentBlock();
+                        }
                         if (!currentBlock) {
                             currentBlock = { type: 'COMMENT', items: [], severity: null };
                             blocks.push(currentBlock);
@@ -1242,15 +1256,7 @@
                             blocks.push({ type: 'EMPTY', item: item });
                         }
                     } else { // DIFF
-                        if (currentBlock) {
-                            // Split trailing EMPTY lines out of the block
-                            let trailingEmpty = [];
-                            while (currentBlock.items.length > 0 && currentBlock.items[currentBlock.items.length - 1].type === 'EMPTY') {
-                                trailingEmpty.unshift(currentBlock.items.pop());
-                            }
-                            currentBlock = null;
-                            trailingEmpty.forEach(e => blocks.push({ type: 'EMPTY', item: e }));
-                        }
+                        flushCurrentBlock();
                         blocks.push({ type: 'DIFF', item: item });
                     }
                 }
