@@ -15,7 +15,7 @@
 use crate::ai::{
     AiErrorClass, AiMessage, AiProvider, AiRequest, AiResponseFormat, AiRole, ClassifyAiError,
 };
-use crate::worker::tools::ToolBox;
+use crate::toolbox::ToolBox;
 use anyhow::{Context, Result};
 
 /// Typed errors that must not be silently retried.
@@ -2346,7 +2346,7 @@ mod tests {
         std::fs::create_dir_all(&prompts_dir).unwrap();
 
         let provider = std::sync::Arc::new(MockProviderAlwaysFails);
-        let tools = crate::worker::tools::ToolBox::new(temp_dir.path().to_path_buf(), None);
+        let tools = crate::toolbox::ToolBox::new(temp_dir.path().to_path_buf(), None);
         let prompts = PromptRegistry::new(prompts_dir);
         let config = WorkerConfig {
             max_input_tokens: 10000,
@@ -2578,7 +2578,7 @@ mod tests {
         let provider = std::sync::Arc::new(MockProviderDuplicateCalls {
             turn: AtomicUsize::new(0),
         });
-        let tools = crate::worker::tools::ToolBox::new(temp_dir.path().to_path_buf(), None);
+        let tools = crate::toolbox::ToolBox::new(temp_dir.path().to_path_buf(), None);
         let prompts = PromptRegistry::new(temp_dir.path().to_path_buf());
         let config = WorkerConfig {
             max_input_tokens: 10000,
@@ -2616,7 +2616,7 @@ mod tests {
         let provider = std::sync::Arc::new(MockProviderNonConsecutiveDuplicate {
             turn: AtomicUsize::new(0),
         });
-        let tools = crate::worker::tools::ToolBox::new(temp_dir.path().to_path_buf(), None);
+        let tools = crate::toolbox::ToolBox::new(temp_dir.path().to_path_buf(), None);
         let prompts = PromptRegistry::new(temp_dir.path().to_path_buf());
         let config = WorkerConfig {
             max_input_tokens: 10000,
@@ -2708,7 +2708,7 @@ mod tests {
         let provider = std::sync::Arc::new(MockBlockedProvider {
             attempts: AtomicUsize::new(0),
         });
-        let tools = crate::worker::tools::ToolBox::new(temp_dir.path().to_path_buf(), None);
+        let tools = crate::toolbox::ToolBox::new(temp_dir.path().to_path_buf(), None);
         let prompts = PromptRegistry::new(prompts_dir);
         let config = WorkerConfig {
             max_input_tokens: 10000,

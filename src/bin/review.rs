@@ -17,9 +17,10 @@ use clap::Parser;
 use sashiko::{
     git_ops::GitWorktree,
     settings::Settings,
+    toolbox::ToolBox,
     worker::{
         PatchInput, ReviewInput, Worker, WorkerConfig, calculate_series_range,
-        prompts::PromptRegistry, tools::ToolBox,
+        prompts::PromptRegistry,
     },
 };
 use serde_json::json;
