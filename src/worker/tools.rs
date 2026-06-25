@@ -18,7 +18,7 @@ use anyhow::{Result, anyhow, ensure};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command;
 
 pub struct ToolBox {
@@ -1085,29 +1085,44 @@ impl ToolBox {
             cmd.arg("--").arg(p);
         }
 
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Ok(json!({ "error": format!("git ls-tree failed: {}", stderr) }));
-        }
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
-        let content = String::from_utf8_lossy(&output.stdout).to_string();
-        let files: Vec<&str> = content.lines().collect();
+        let mut child = cmd.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open stdout"))?;
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
 
         let regex = glob_to_regex(pattern)?;
         let mut matched_files = Vec::new();
-        for f in files {
-            if regex.is_match(f) {
-                matched_files.push(f);
+        let mut total_found = 0;
+        let mut is_truncated = false;
+
+        while let Some(line) = reader.next_line().await? {
+            if regex.is_match(&line) {
+                total_found += 1;
+                if matched_files.len() < 1000 {
+                    matched_files.push(line);
+                } else {
+                    is_truncated = true;
+                    let _ = child.kill().await;
+                    break;
+                }
             }
         }
 
-        let total_found = matched_files.len();
-        let (truncated_files, is_truncated) = if total_found > 1000 {
-            (matched_files[..1000].join("\n"), true)
-        } else {
-            (matched_files.join("\n"), false)
-        };
+        let status = child.wait().await?;
+        if !is_truncated && !status.success() {
+            let mut stderr_str = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut stderr_str).await;
+            }
+            return Err(anyhow!("git ls-tree failed: {}", stderr_str.trim()));
+        }
+
+        let truncated_files = matched_files.join("\n");
 
         Ok(json!({
             "content": truncated_files,
