@@ -561,10 +561,12 @@ pub mod kiro_cli;
 pub mod openai;
 pub mod proxy;
 pub mod quota;
+pub mod session;
 pub mod token_budget;
 pub mod truncator;
 #[cfg(feature = "vertex")]
 pub mod vertex;
+pub use session::{ErrorAction, LlmSession, SessionRunner, ValidationError};
 
 /// Recursively removes `thought_signature` and `thoughtSignature` fields from a JSON value.
 pub fn scrub_thought_signatures(val: &mut serde_json::Value) {
