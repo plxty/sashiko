@@ -132,11 +132,40 @@ cargo build --release
 
 ## Usage
 
-Sashiko consists of two main components: the **Daemon** and the **CLI**.
+Sashiko requires a configuration file to run (usually `~/.config/sashiko.toml` or `./Settings.toml`). You can initialize a default configuration with:
 
-### 1. Daemon
+```bash
+sashiko init
+```
 
-The daemon is responsible for monitoring mailing lists, managing the database, and coordinating the AI review process. It also provides a Web UI and an API for the CLI.
+Sashiko can be run in two modes: **Local Review** (standalone, no daemon required) or as a **Daemon** (for automated monitoring, web UI, and team integration).
+
+### 1. Local Review (Recommended)
+
+Sashiko can review your patches locally without starting the daemon, sending emails, or updating the database.
+
+Run it from the Linux source checkout containing the commits to review:
+
+```bash
+# Review the latest commit
+sashiko review
+
+# Review a range of commits
+sashiko review HEAD~3..HEAD
+```
+
+This mode:
+* Does not start the daemon or open the Sashiko database.
+* Does not fetch or configure git remotes.
+* Uses a temporary scratch clone for patch application, leaving your source checkout and its git metadata untouched.
+
+For local review, Sashiko loads settings from `./Settings.toml` if it exists in the current directory, otherwise from `~/.config/sashiko.toml`. Use `--settings <path>` to point to a specific settings file.
+
+See the [CLI Reference](docs/sashiko-cli.md#local) for more details.
+
+### 2. Daemon Mode
+
+The daemon is responsible for monitoring mailing lists (NNTP), managing the database, and coordinating the AI review process. It also provides a Web UI and an API.
 
 To start the daemon:
 
@@ -146,56 +175,25 @@ sashiko
 
 (Or from source: `cargo run`, or via Nix: `nix run github:sashiko-dev/sashiko`)
 
-### 2. CLI
+#### Web Interface
 
-The CLI (`sashiko-cli`) allows you to interact with the running Sashiko daemon
-or run standalone local reviews from your terminal. For the full command
-reference, including local review setup and all options, see the
-[CLI Reference](docs/sashiko-cli.md).
+Once the daemon is running, you can access the Web UI. The daemon will print the URL to access it from localhost.
 
-Quick start:
+### 3. CLI (Interacting with the Daemon)
+
+The CLI tool `sashiko-cli` allows you to interact with a running Sashiko daemon.
 
 ```bash
-# Submit patches to a running daemon
+# Submit patches to the running daemon
 sashiko-cli submit HEAD~3..HEAD
-
-# Run a local review (no daemon required)
-sashiko review
 
 # Check review status
 sashiko-cli show latest
 ```
 
-(From source: `cargo run --bin sashiko-cli -- [OPTIONS] [COMMAND]`,
-or via Nix: `nix profile add github:sashiko-dev/sashiko`)
+(From source: `cargo run --bin sashiko-cli -- [OPTIONS] [COMMAND]`, or via Nix: `nix profile add github:sashiko-dev/sashiko`)
 
-### 3. Local Review
-
-Sashiko can review your patches locally without sending emails to LKML or
-updating sashiko.dev:
-
-```bash
-sashiko review
-sashiko review HEAD~3..HEAD
-```
-
-Run it from the Linux source checkout containing the commits to review. This
-mode does not start the daemon, does not open the Sashiko database, and does
-not fetch or configure git remotes. It uses a temporary scratch clone for patch
-application and review context, leaving the source checkout and its git
-metadata alone.
-
-For local review, Sashiko loads settings from `./Settings.toml` if that file
-exists in the current directory, otherwise from `~/.config/sashiko.toml`. Use
-`--settings <path>` to point at a specific settings file.
-
-See the [CLI Reference](docs/sashiko-cli.md#local) for the older
-`sashiko-cli local` workflow and a comparison of review modes.
-
-### 4. Web Interface
-
-Once the daemon is running, you can access the Web UI, the daemon will print the
-URL to access it from localhost.
+For the full command reference, see the [CLI Reference](docs/sashiko-cli.md).
 
 ## Benchmarking
 
