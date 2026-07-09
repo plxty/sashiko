@@ -31,6 +31,7 @@ In-depth coverage from the premier Linux news source.
 ## Major Tech News
 Coverage in widely read technical publications.
 * **The New Stack:** [Why Linux creator Linus Torvalds gets angry hearing "99% of code is AI"](https://thenewstack.io/torvalds-ai-programming-productivity/)
+* **ZDNET:** ['I'm not a programmer' anymore: Linus Torvalds on the only two tools he uses now](https://www.zdnet.com/article/open-source-summit-linus-torvalds/)
 * **The Register:** [Sashiko code review linux](https://www.theregister.com/2026/03/20/sashiko_code_review_linux/)
 * **The Register:** [Greg Kroah-Hartman AI kernel](https://www.theregister.com/2026/03/26/greg_kroahhartman_ai_kernel/)
 * **Phoronix:** [Sashiko Linux AI Code Review](https://www.phoronix.com/news/Sashiko-Linux-AI-Code-Review)
