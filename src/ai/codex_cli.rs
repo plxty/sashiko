@@ -29,7 +29,10 @@ use super::claude_cli::{build_prompt, parse_inner_response};
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiUsage, ProviderCapabilities};
 
 pub struct CodexCliProvider {
+    pub path: Option<String>,
     pub model: String,
+    pub effort: Option<String>,
+    pub timeout_secs: u64,
 }
 
 #[async_trait]
@@ -41,30 +44,44 @@ impl AiProvider for CodexCliProvider {
 
         // codex exec --json --sandbox read-only -m MODEL
         // Prompt is passed via stdin to avoid ARG_MAX issues with large prompts.
-        let mut child = Command::new("codex")
-            .args([
-                "exec",
-                "--json",
-                "--sandbox",
-                "read-only",
-                "-m",
-                &self.model,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn codex CLI: {}. Is it installed?", e))?;
+        let mut args = vec![
+            "exec".to_string(),
+            "--json".to_string(),
+            "--sandbox".to_string(),
+            "read-only".to_string(),
+            "-c".to_string(),
+            format!("model=\"{}\"", self.model),
+        ];
+
+        if let Some(effort) = &self.effort {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort=\"{}\"", effort));
+        }
+
+        let mut child = Command::new(if let Some(path) = &self.path {
+            path
+        } else {
+            "codex"
+        })
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn codex CLI: {}. Is it installed?", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
             stdin.flush().await?;
         }
 
-        let output = timeout(Duration::from_secs(600), child.wait_with_output())
+        let timeout_duration = Duration::from_secs(self.timeout_secs);
+        let output = timeout(timeout_duration, child.wait_with_output())
             .await
-            .map_err(|_| anyhow::anyhow!("codex CLI timed out after 10 minutes"))?
+            .map_err(|_| {
+                anyhow::anyhow!("codex CLI timed out after {} seconds", self.timeout_secs)
+            })?
             .map_err(|e| anyhow::anyhow!("codex CLI wait error: {}", e))?;
 
         if !output.stderr.is_empty() {

@@ -1150,7 +1150,7 @@ fn render_progress(state: &mut ProgressState) {
         let filled_bar = "█".repeat(filled);
         let _ = tw.write_segment(&filled_bar, Some(Color::Green), false);
 
-        let empty_bar = "░".repeat(width - filled);
+        let empty_bar = "░".repeat(if width > filled { width - filled } else { 0 });
         let _ = tw.write_segment(&empty_bar, None, false);
 
         let _ = tw.write_segment("] ", None, true);

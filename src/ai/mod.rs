@@ -493,9 +493,15 @@ pub fn create_provider_from_ai(ai: &AiSettings) -> Result<Arc<dyn AiProvider>> {
                 config: cfg.and_then(|c| c.config.clone()),
             }))
         }
-        "codex-cli" => Ok(Arc::new(codex_cli::CodexCliProvider {
-            model: ai.model.clone(),
-        })),
+        "codex-cli" => {
+            let cfg = ai.codex_cli.as_ref();
+            Ok(Arc::new(codex_cli::CodexCliProvider {
+                path: cfg.and_then(|c| c.path.clone()),
+                model: ai.model.clone(),
+                effort: cfg.and_then(|c| c.effort.clone()),
+                timeout_secs: ai.api_timeout_secs,
+            }))
+        }
         "copilot-cli" => Ok(Arc::new(copilot_cli::CopilotCliProvider {
             model: ai.model.clone(),
         })),

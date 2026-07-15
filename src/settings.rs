@@ -274,6 +274,15 @@ pub struct DevinCliSettings {
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
+pub struct CodexCliSettings {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
 pub struct AiSettings {
     pub provider: String,
     pub model: String,
@@ -306,6 +315,7 @@ pub struct AiSettings {
     pub kiro_cli: Option<KiroCliSettings>,
     pub claude_cli: Option<ClaudeCliSettings>,
     pub devin_cli: Option<DevinCliSettings>,
+    pub codex_cli: Option<CodexCliSettings>,
 }
 
 fn default_response_cache_ttl_days() -> u64 {
